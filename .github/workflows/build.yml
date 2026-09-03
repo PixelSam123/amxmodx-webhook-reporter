@@ -1,0 +1,88 @@
+name: Build AMXX Plugin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build_linux:
+    name: Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install AMX Mod X compiler 1.10 (Linux)
+        run: |
+          wget -q https://github.com/alliedmodders/amxmodx/releases/download/1.10.0.5481/amxmodx-1.10.0-git5481-base-linux.tar.gz -O amxmodx.tar.gz
+          tar -xzf amxmodx.tar.gz
+          AMXXPC=$(find . -name "amxxpc" -type f | head -n1)
+          echo "AMXXPC=$AMXXPC" >> $GITHUB_ENV
+          ls -la "$AMXXPC"
+          chmod +x "$AMXXPC"
+
+      - name: Install AmxxEasyHttp includes
+        run: |
+          mkdir -p amxmodx/scripting/include
+          curl -L -o /tmp/easy_http.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http.inc
+          curl -L -o /tmp/easy_http_json.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http_json.inc
+          cp /tmp/easy_http.inc amxmodx/scripting/include/
+          cp /tmp/easy_http_json.inc amxmodx/scripting/include/
+          ls -la amxmodx/scripting/include/easy_http*
+
+      - name: Compile webhook_reporter.sma
+        run: |
+          mkdir -p amxmodx/scripting/compiled
+          echo "Using compiler: $AMXXPC"
+          ls -la amxmodx/scripting/
+          "$AMXXPC" amxmodx/scripting/webhook_reporter.sma -oamxmodx/scripting/compiled/webhook_reporter.amxx -iamxmodx/scripting/include -iaddons/amxmodx/scripting/include
+          ls -lh amxmodx/scripting/compiled/
+
+      - name: Upload artifact (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhook_reporter-linux.amxx
+          path: amxmodx/scripting/compiled/webhook_reporter.amxx
+          if-no-files-found: error
+
+  build_windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install AMX Mod X compiler 1.10 (Windows)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/alliedmodders/amxmodx/releases/download/1.10.0.5481/amxmodx-1.10.0-git5481-base-windows.zip -OutFile amxmodx.zip
+          Expand-Archive amxmodx.zip -DestinationPath amxmodx_win -Force
+          $AMXXPC = Get-ChildItem -Recurse -Filter "amxxpc.exe" -Path amxmodx_win | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "AMXXPC=$AMXXPC"
+          "AMXXPC=$AMXXPC" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-ChildItem -Path $AMXXPC | Format-List *
+
+      - name: Install AmxxEasyHttp includes
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path amxmodx/scripting/include -Force | Out-Null
+          Invoke-WebRequest -Uri https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http.inc -OutFile amxmodx/scripting/include/easy_http.inc
+          Invoke-WebRequest -Uri https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http_json.inc -OutFile amxmodx/scripting/include/easy_http_json.inc
+          Get-ChildItem amxmodx/scripting/include/easy_http* | Format-List Name,Length
+
+      - name: Compile webhook_reporter.sma
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path amxmodx/scripting/compiled -Force | Out-Null
+          Write-Host "Using compiler: $env:AMXXPC"
+          Get-ChildItem amxmodx/scripting/ | Format-Table Name,Length
+          & $env:AMXXPC amxmodx/scripting/webhook_reporter.sma -oamxmodx/scripting/compiled/webhook_reporter.amxx -iamxmodx/scripting/include
+          Get-ChildItem amxmodx/scripting/compiled/ | Format-Table Name,Length
+          if (-not (Test-Path amxmodx/scripting/compiled/webhook_reporter.amxx)) { throw "Compile failed - artifact missing" }
+
+      - name: Upload artifact (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhook_reporter-windows.amxx
+          path: amxmodx/scripting/compiled/webhook_reporter.amxx
+          if-no-files-found: error

@@ -1,0 +1,5 @@
+amxmodx/scripting/compiled/*.amxx
+!amxmodx/scripting/compiled/.gitkeep
+*.amxx
+.DS_Store
+Thumbs.db

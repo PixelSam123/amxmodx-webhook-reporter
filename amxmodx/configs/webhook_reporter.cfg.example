@@ -1,0 +1,10 @@
+// amxmodx/configs/webhook_reporter.cfg
+// Copy this file to webhook_reporter.cfg and set your Discord webhook URL.
+// This file is executed automatically on plugin_cfg (and you can exec it manually).
+
+// Single Discord webhook URL for all events. Keep it private!
+// Example: https://discord.com/api/webhooks/1234567890/AbcDefGhIjKlMnOpQrStUvWxYz
+amx_webhook_url ""
+
+// Bot username shown in Discord (embeds and plain messages). Default: "CS 1.6 Server"
+amx_webhook_botname "CS 1.6 Server"
