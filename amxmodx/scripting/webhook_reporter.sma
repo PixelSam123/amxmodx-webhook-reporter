@@ -5,6 +5,10 @@
 
 #pragma semicolon 1
 
+#define PLUGIN "Discord Webhook Reporter"
+#define VERSION "1.0.0"
+#define AUTHOR "PixelSam123"
+
 #define MAX_WEBHOOK_URL 512
 #define MAX_MSG_LEN     1900
 
@@ -28,7 +32,7 @@ new g_iMsgTeamScore;
 
 public plugin_init()
 {
-    register_plugin("Discord Webhook Reporter", "1.0.0", "amxmodx-webhook-reporter");
+    register_plugin(PLUGIN, VERSION, AUTHOR);
 
     g_pCvarWebhookUrl = register_cvar("amx_webhook_url", "", FCVAR_PROTECTED);
     g_pCvarBotName    = register_cvar("amx_webhook_botname", "CS 1.6 Server");
