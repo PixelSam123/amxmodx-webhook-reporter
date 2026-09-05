@@ -29,10 +29,8 @@ jobs:
       - name: Install AmxxEasyHttp includes
         run: |
           mkdir -p amxmodx/scripting/include
-          curl -L -o /tmp/easy_http.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http.inc
-          curl -L -o /tmp/easy_http_json.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http_json.inc
-          cp /tmp/easy_http.inc amxmodx/scripting/include/
-          cp /tmp/easy_http_json.inc amxmodx/scripting/include/
+          wget -q -O amxmodx/scripting/include/easy_http.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http.inc
+          wget -q -O amxmodx/scripting/include/easy_http_json.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http_json.inc
           ls -la amxmodx/scripting/include/easy_http*
 
       - name: Compile webhook_reporter.sma
@@ -43,6 +41,7 @@ jobs:
           ls -la amxmodx/scripting/
           LD_LIBRARY_PATH="$AMXXPC_DIR:$LD_LIBRARY_PATH" "$AMXXPC" amxmodx/scripting/webhook_reporter.sma -oamxmodx/scripting/compiled/webhook_reporter.amxx -iamxmodx/scripting/include -iaddons/amxmodx/scripting/include
           ls -lh amxmodx/scripting/compiled/
+          test -f amxmodx/scripting/compiled/webhook_reporter.amxx || { echo "Compile failed - artifact missing" >&2; exit 1; }
 
       - name: Upload artifact (Linux)
         uses: actions/upload-artifact@v4
@@ -65,8 +64,6 @@ jobs:
           Get-ChildItem -Recurse -Filter "amxxpc*" -Path amxmodx_win | Format-Table FullName,Length
           $AMXXPC = Get-ChildItem -Recurse -Filter "amxxpc.exe" -Path amxmodx_win | Select-Object -First 1 -ExpandProperty FullName
           $AMXXPC_DIR = Split-Path $AMXXPC
-          Write-Host "AMXXPC=$AMXXPC"
-          Write-Host "AMXXPC_DIR=$AMXXPC_DIR"
           "AMXXPC=$AMXXPC" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "AMXXPC_DIR=$AMXXPC_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Get-ChildItem $AMXXPC_DIR/amxxpc* | Format-List Name,Length,FullName
@@ -83,9 +80,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path amxmodx/scripting/compiled -Force | Out-Null
-          Write-Host "Using compiler: $env:AMXXPC"
+          Write-Host "Using compiler: $env:AMXXPC (dir $env:AMXXPC_DIR)"
+          Get-ChildItem "$env:AMXXPC_DIR/amxxpc*" | Format-Table Name,Length
           Get-ChildItem amxmodx/scripting/ | Format-Table Name,Length
-          & $env:AMXXPC amxmodx/scripting/webhook_reporter.sma -oamxmodx/scripting/compiled/webhook_reporter.amxx -iamxmodx/scripting/include
+          & $env:AMXXPC "amxmodx\scripting\webhook_reporter.sma" "-oamxmodx\scripting\compiled\webhook_reporter.amxx" "-iamxmodx\scripting\include" "-iamxmodx_win\addons\amxmodx\scripting\include"
           Get-ChildItem amxmodx/scripting/compiled/ | Format-Table Name,Length
           if (-not (Test-Path amxmodx/scripting/compiled/webhook_reporter.amxx)) { throw "Compile failed - artifact missing" }
 
