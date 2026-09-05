@@ -17,9 +17,13 @@ jobs:
         run: |
           wget -q https://github.com/alliedmodders/amxmodx/releases/download/1.10.0.5481/amxmodx-1.10.0-git5481-base-linux.tar.gz -O amxmodx.tar.gz
           tar -xzf amxmodx.tar.gz
+          ls -lh addons/amxmodx/scripting/amxxpc*
           AMXXPC=$(find . -name "amxxpc" -type f | head -n1)
+          AMXXPC_DIR=$(dirname "$AMXXPC")
           echo "AMXXPC=$AMXXPC" >> $GITHUB_ENV
-          ls -la "$AMXXPC"
+          echo "AMXXPC_DIR=$AMXXPC_DIR" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$AMXXPC_DIR:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          ls -la "$AMXXPC" "$AMXXPC_DIR/amxxpc32.so"
           chmod +x "$AMXXPC"
 
       - name: Install AmxxEasyHttp includes
@@ -34,9 +38,10 @@ jobs:
       - name: Compile webhook_reporter.sma
         run: |
           mkdir -p amxmodx/scripting/compiled
-          echo "Using compiler: $AMXXPC"
+          echo "Using compiler: $AMXXPC (dir $AMXXPC_DIR)"
+          ls -la "$AMXXPC_DIR/amxxpc"*
           ls -la amxmodx/scripting/
-          "$AMXXPC" amxmodx/scripting/webhook_reporter.sma -oamxmodx/scripting/compiled/webhook_reporter.amxx -iamxmodx/scripting/include -iaddons/amxmodx/scripting/include
+          LD_LIBRARY_PATH="$AMXXPC_DIR:$LD_LIBRARY_PATH" "$AMXXPC" amxmodx/scripting/webhook_reporter.sma -oamxmodx/scripting/compiled/webhook_reporter.amxx -iamxmodx/scripting/include -iaddons/amxmodx/scripting/include
           ls -lh amxmodx/scripting/compiled/
 
       - name: Upload artifact (Linux)
@@ -57,10 +62,14 @@ jobs:
         run: |
           Invoke-WebRequest -Uri https://github.com/alliedmodders/amxmodx/releases/download/1.10.0.5481/amxmodx-1.10.0-git5481-base-windows.zip -OutFile amxmodx.zip
           Expand-Archive amxmodx.zip -DestinationPath amxmodx_win -Force
+          Get-ChildItem -Recurse -Filter "amxxpc*" -Path amxmodx_win | Format-Table FullName,Length
           $AMXXPC = Get-ChildItem -Recurse -Filter "amxxpc.exe" -Path amxmodx_win | Select-Object -First 1 -ExpandProperty FullName
+          $AMXXPC_DIR = Split-Path $AMXXPC
           Write-Host "AMXXPC=$AMXXPC"
+          Write-Host "AMXXPC_DIR=$AMXXPC_DIR"
           "AMXXPC=$AMXXPC" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Get-ChildItem -Path $AMXXPC | Format-List *
+          "AMXXPC_DIR=$AMXXPC_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-ChildItem $AMXXPC_DIR/amxxpc* | Format-List Name,Length,FullName
 
       - name: Install AmxxEasyHttp includes
         shell: pwsh
