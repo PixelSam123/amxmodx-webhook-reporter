@@ -17,6 +17,7 @@
 // Use a dedicated base offset per task type.
 #define TASK_CFG        9876
 #define TASK_CONNECT_BASE 5000
+#define TASK_ROUND      9877
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
@@ -30,6 +31,8 @@ new bool:g_bChangingMap = false;
 
 new g_iTScore;
 new g_iCTScore;
+new bool:g_bPendingTWin;
+new bool:g_bPendingDraw;
 
 new EzHttpQueue:g_Queue;
 
@@ -113,6 +116,9 @@ public Task_ReadCvarsAndHandle(iTaskId)
         // Scores reset on new map (engine resets, but we also reset for safety)
         g_iTScore = 0;
         g_iCTScore = 0;
+        // Drop any pending round embed from the previous map so it
+        // doesn't fire with reset scores on the new map.
+        remove_task(TASK_ROUND);
     }
 }
 
@@ -341,7 +347,9 @@ stock StripColors(szMsg[], iLen)
 
 public OnTeamScore(iMsgId, iDest, id)
 {
-    new szTeam[2];
+    // Must fit "TERRORIST" + EOS. A [2] buffer truncates to "T"/"C"
+    // so both equal() checks below never matched and scores stayed 0/0.
+    new szTeam[16];
     get_msg_arg_string(1, szTeam, charsmax(szTeam));
     new iScore = get_msg_arg_int(2);
 
@@ -356,18 +364,35 @@ public OnTeamScore(iMsgId, iDest, id)
 public OnTWin()
 {
     // Terrorists = Attackers
-    Webhook_SendRoundEmbed(true, false);
+    // SendAudio fires before the updated TeamScore message arrives,
+    // so delay the embed to let OnTeamScore update g_iTScore/g_iCTScore first.
+    g_bPendingTWin = true;
+    g_bPendingDraw = false;
+    remove_task(TASK_ROUND);
+    set_task(1.0, "Task_SendRoundEmbed", TASK_ROUND);
 }
 
 public OnCTWin()
 {
     // CT = Defenders
-    Webhook_SendRoundEmbed(false, false);
+    g_bPendingTWin = false;
+    g_bPendingDraw = false;
+    remove_task(TASK_ROUND);
+    set_task(1.0, "Task_SendRoundEmbed", TASK_ROUND);
 }
 
 public OnRoundDraw()
 {
-    Webhook_SendRoundEmbed(false, true);
+    g_bPendingTWin = false;
+    g_bPendingDraw = true;
+    remove_task(TASK_ROUND);
+    set_task(1.0, "Task_SendRoundEmbed", TASK_ROUND);
+}
+
+public Task_SendRoundEmbed(iTaskId)
+{
+    #pragma unused iTaskId
+    Webhook_SendRoundEmbed(g_bPendingTWin, g_bPendingDraw);
 }
 
 stock Webhook_SendRoundEmbed(bool:bTWin, bool:bDraw)
