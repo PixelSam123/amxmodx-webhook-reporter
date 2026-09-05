@@ -10,7 +10,13 @@
 #define AUTHOR "PixelSam123"
 
 #define MAX_WEBHOOK_URL 512
-#define MAX_MSG_LEN     1900
+#define MAX_MSG_LEN     512
+#define MAX_CHAT_LEN    384
+
+// Task ids: never use raw player ids as task ids (collides with cfg task id 0).
+// Use a dedicated base offset per task type.
+#define TASK_CFG        9876
+#define TASK_CONNECT_BASE 5000
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
@@ -68,12 +74,15 @@ public plugin_cfg()
     // Single delayed path: exec config then read cvars + handle map logic in one task.
     // server_cmd is queued, so we must wait for exec to complete before reading.
     server_cmd("exec addons/amxmodx/configs/webhook_reporter.cfg");
-    set_task(0.5, "Task_ReadCvarsAndHandle");
+    remove_task(TASK_CFG);
+    set_task(0.5, "Task_ReadCvarsAndHandle", TASK_CFG);
 }
 
-public Task_ReadCvarsAndHandle()
+public Task_ReadCvarsAndHandle(iTaskId)
 {
-    // Single place where cvars are read — after exec has completed
+    // iTaskId == TASK_CFG, unused except to satisfy set_task callback signature.
+    // (Taking the task id param avoids arg-count mismatch on strict cores.)
+    #pragma unused iTaskId
     get_pcvar_string(g_pCvarWebhookUrl, g_szWebhookUrl, charsmax(g_szWebhookUrl));
     get_pcvar_string(g_pCvarBotName, g_szBotName, charsmax(g_szBotName));
     trim(g_szWebhookUrl);
@@ -171,12 +180,17 @@ public client_putinserver(id)
 
     get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
 
-    // Delay to ensure SteamID/name propagated and to avoid spam on fast reconnects
-    set_task(0.5, "Task_DelayedConnect", id);
+    // Delay to ensure SteamID/name propagated and to avoid spam on fast reconnects.
+    // Use offset task id so it never collides with TASK_CFG or other plugins' raw ids.
+    remove_task(id + TASK_CONNECT_BASE);
+    set_task(0.5, "Task_DelayedConnect", id + TASK_CONNECT_BASE);
 }
 
-public Task_DelayedConnect(id)
+public Task_DelayedConnect(iTaskId)
 {
+    new id = iTaskId - TASK_CONNECT_BASE;
+    if (id < 1 || id > 32)
+        return;
     if (!is_user_connected(id) || is_user_bot(id) || is_user_hltv(id))
         return;
     get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
@@ -188,6 +202,10 @@ public Task_DelayedConnect(id)
 public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
 {
     // Requires AMXX 1.9+ (forward introduced in PR #264)
+    #pragma unused drop, szMessage, iMaxLen
+    // Kill any pending delayed-connect so a fast rejoin doesn't emit a stale "connected".
+    remove_task(id + TASK_CONNECT_BASE);
+
     if (is_user_bot(id) || is_user_hltv(id))
         return;
 
@@ -259,7 +277,8 @@ public OnChat(id)
     new bool:bIsTeam = equal(szCmd, "say_team") != 0;
 
     // Build plain chat line: e.g. "*DEAD* (A) [TEAM] Nick: hello" or "(D) Nick: hello"
-    new szOut[MAX_MSG_LEN];
+    // Keep on stack small: name(32) + raw(192) + prefixes fit easily in MAX_CHAT_LEN.
+    new szOut[MAX_CHAT_LEN];
     if (bIsDead && bIsTeam)
         formatex(szOut, charsmax(szOut), "*DEAD* %s [TEAM] %s: %s", szTeamPrefix, szName, szRaw);
     else if (bIsDead)
@@ -363,7 +382,9 @@ stock Webhook_SendRoundEmbed(bool:bTWin, bool:bDraw)
 
 stock Webhook_SendPlain(const szFmt[], any:...)
 {
-    new szMsg[MAX_MSG_LEN];
+    // static = not on Pawn stack, avoids nested stack blowout
+    // (OnChat szOut + this + PostPlain). Single-threaded, so safe.
+    static szMsg[MAX_MSG_LEN];
     vformat(szMsg, charsmax(szMsg), szFmt, 2);
     Webhook_PostPlain(szMsg, false);
 }
@@ -385,10 +406,9 @@ stock Webhook_PostPlain(const szContent[], bool:bForget)
         }
     }
 
-    // Escape for JSON
-    new szEscaped[MAX_MSG_LEN * 2];
-    JsonEscape(szContent, szEscaped, charsmax(szEscaped));
-
+    // NOTE: no manual JsonEscape — ezjson_object_set_string() escapes internally.
+    // Manual escaping doubled backslashes/quotes AND cost a 3800-cell stack buffer
+    // (run time error 3: stack error at old line 389).
     new EzJSON:obj = ezjson_init_object();
     if (obj == EzInvalid_JSON)
     {
@@ -396,7 +416,7 @@ stock Webhook_PostPlain(const szContent[], bool:bForget)
         return;
     }
 
-    ezjson_object_set_string(obj, "content", szEscaped);
+    ezjson_object_set_string(obj, "content", szContent);
     if (g_szBotName[0] != EOS)
         ezjson_object_set_string(obj, "username", g_szBotName);
 
@@ -487,58 +507,4 @@ public OnHttpComplete(EzHttpRequest:request_id)
         new iHttp = ezhttp_get_http_code(request_id);
         log_amx("[Webhook] POST failed err=%d http=%d msg=%s", iErr, iHttp, szErr);
     }
-}
-
-// ---------------------------------------------------------------------------
-// JSON escape — minimal (", \, newline, carriage, tab)
-// ---------------------------------------------------------------------------
-
-stock JsonEscape(const szIn[], szOut[], iOutMax)
-{
-    new i, j, c;
-    new iLen = strlen(szIn);
-    for (i = 0, j = 0; i < iLen && j < iOutMax - 2; i++)
-    {
-        c = szIn[i];
-        if (c == 34) // '"'
-        {
-            if (j + 2 >= iOutMax) break;
-            szOut[j++] = 92; // '\'
-            szOut[j++] = 34; // '"'
-        }
-        else if (c == 92) // '\'
-        {
-            if (j + 2 >= iOutMax) break;
-            szOut[j++] = 92;
-            szOut[j++] = 92;
-        }
-        else if (c == 10) // '\n'
-        {
-            if (j + 2 >= iOutMax) break;
-            szOut[j++] = 92;
-            szOut[j++] = 110; // 'n'
-        }
-        else if (c == 13) // '\r'
-        {
-            if (j + 2 >= iOutMax) break;
-            szOut[j++] = 92;
-            szOut[j++] = 114; // 'r'
-        }
-        else if (c == 9) // '\t'
-        {
-            if (j + 2 >= iOutMax) break;
-            szOut[j++] = 92;
-            szOut[j++] = 116; // 't'
-        }
-        else if (c < 32)
-        {
-            // Skip other control chars
-            continue;
-        }
-        else
-        {
-            szOut[j++] = c;
-        }
-    }
-    szOut[j] = EOS;
 }
