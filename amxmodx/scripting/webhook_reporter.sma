@@ -196,7 +196,7 @@ public Task_DelayedConnect(iTaskId)
     get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
     if (g_szPlayerName[id][0] == EOS)
         return;
-    Webhook_SendPlain("%s connected", g_szPlayerName[id]);
+    Webhook_SendPlain("%s connected (%d online)", g_szPlayerName[id], GetRealPlayerCount());
 }
 
 public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
@@ -209,19 +209,33 @@ public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
     if (is_user_bot(id) || is_user_hltv(id))
         return;
 
+    // Remaining count: leaving player is already disconnected at this point.
+    new iOnline = GetRealPlayerCount();
+
     // g_szPlayerName still holds nickname since entity is still valid here
     if (g_szPlayerName[id][0] != EOS)
     {
-        Webhook_SendPlain("%s disconnected", g_szPlayerName[id]);
+        Webhook_SendPlain("%s disconnected (%d online)", g_szPlayerName[id], iOnline);
     }
     else
     {
         new szName[32];
         get_user_name(id, szName, charsmax(szName));
         if (szName[0] != EOS)
-            Webhook_SendPlain("%s disconnected", szName);
+            Webhook_SendPlain("%s disconnected (%d online)", szName, iOnline);
     }
     g_szPlayerName[id][0] = EOS;
+}
+
+stock GetRealPlayerCount()
+{
+    new iCount = 0;
+    for (new i = 1; i <= 32; i++)
+    {
+        if (is_user_connected(i) && !is_user_bot(i) && !is_user_hltv(i))
+            iCount++;
+    }
+    return iCount;
 }
 
 // ---------------------------------------------------------------------------

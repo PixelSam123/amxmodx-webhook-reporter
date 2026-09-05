@@ -7,8 +7,8 @@ CS 1.6 AMX Mod X plugin that forwards server events to a Discord webhook. Uses [
 - **Plugin loaded / Server startup** - plain text on `plugin_cfg` first load
 - **Plugin unloaded / Server shutdown** - plain text in `plugin_end` when not a map change
 - **Map change** - embed with `Previous -> New` map name (blue, `0x3498DB`). Also sends a `Map Ended` embed from `plugin_end` when a map finishes
-- **Player connected** - plain text, non-bot only, nickname only (filtered via `is_user_bot` / `is_user_hltv`)
-- **Player disconnected** - plain text, non-bot only, nickname only
+- **Player connected** - plain text, non-bot only, nickname only (filtered via `is_user_bot` / `is_user_hltv`), includes real-player count e.g. `Nick connected (3 online)`
+- **Player disconnected** - plain text, non-bot only, nickname only, includes remaining real-player count e.g. `Nick disconnected (2 online)`
 - **Player chat** - plain text for `say` and `say_team` with prefixes: `(A)` for Attackers (T), `(D)` for Defenders (CT), `(SPEC)` for spectators, `*DEAD*` when dead, `[TEAM]` for team chat. Strips color codes `^1-^4`/`!g`/`!y`/`!t` and ignores chat commands starting with `/ ! . ? @`
 - **Round finished** - embed `Attackers Win! / Defenders Win! / Round Draw! Score (A/D): T/CT` with color (red `0xE74C3C` for Attackers, blue `0x3498DB` for Defenders, grey `0x95A5A6` for draw) and tracked via `TeamScore` message
 
@@ -90,8 +90,8 @@ All messages are queued via `EzHttpQueue` and sent with `Content-Type: applicati
   ```
   (A) PlayerName: hello team
   *DEAD* (D) [TEAM] PlayerName: nice try
-  PlayerName connected
-  PlayerName disconnected
+  PlayerName connected (5 online)
+  PlayerName disconnected (4 online)
   Plugin loaded - Server started on map `de_dust2`
   Plugin unloaded - Server shutting down (last map: de_dust2)
   ```
