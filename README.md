@@ -4,12 +4,12 @@ CS 1.6 AMX Mod X plugin that forwards server events to a Discord webhook. Uses [
 
 ## Features
 
-- **Plugin loaded / Server startup** - plain text on `plugin_cfg` first load
-- **Plugin unloaded / Server shutdown** - plain text in `plugin_end` when not a map change
-- **Map change** - embed with `Previous -> New` map name (blue, `0x3498DB`). Also sends a `Map Ended` embed from `plugin_end` when a map finishes
+- **Plugin loaded / Server startup** - plain text `Server started on map ...` (map name backticked) on `plugin_cfg` first load
+- **Plugin unloaded / Server shutdown** - plain text `Server shutting down (last map: ...)` (map name backticked) in `plugin_end` when not a map change
+- **Map change** - embed with `Previous -> New` map name (blue, `0x3498DB`). Also sends a `Map Ended` embed (grey, `0x95A5A6`) from `plugin_end` when a map finishes
 - **Player connected** - plain text, non-bot only, nickname only (filtered via `is_user_bot` / `is_user_hltv`), includes real-player count e.g. `Nick connected (3 online)`
 - **Player disconnected** - plain text, non-bot only, nickname only, includes remaining real-player count e.g. `Nick disconnected (2 online)`
-- **Player chat** - plain text for `say` and `say_team` with prefixes: `(A)` for Attackers (T), `(D)` for Defenders (CT), `(SPEC)` for spectators, `*DEAD*` when dead, `[TEAM]` for team chat. Strips color codes `^1-^4`/`!g`/`!y`/`!t` and ignores chat commands starting with `/ ! . ? @`
+- **Player chat** - plain text for `say` and `say_team` with prefixes: `(A)` for Attackers (T), `(D)` for Defenders (CT), `(SPEC)` for spectators, `*DEAD*` when dead, `[TEAM]` for team chat; `(SPEC)` is also used for unassigned players. Strips color codes `^0-^9`/`!g`/`!y`/`!t`, collapses double spaces, and ignores chat commands starting with `/ ! . ? @`
 - **Round finished** - embed `Attackers Win! / Defenders Win! / Round Draw! Score (A/D): T/CT` with color (red `0xE74C3C` for Attackers, blue `0x3498DB` for Defenders, grey `0x95A5A6` for draw) and tracked via `TeamScore` message
 
 No `@mentions`, no SteamID/IP/hostname broadcasting.
@@ -80,7 +80,7 @@ No `@mentions`, no SteamID/IP/hostname broadcasting.
 
 All messages are queued via `EzHttpQueue` and sent with `Content-Type: application/json`. Requests that would be interrupted by map change use `EZH_FORGET_REQUEST` (fire-and-forget) so the `Map Ended` webhook still fires.
 
-`bForget` (`bool:bForget` in `Webhook_PostPlain`/`Webhook_SendEmbedRaw:45`) maps to `EzHttpPluginEndBehaviour` (`easy_http.inc:60`): `false` = `EZH_CANCEL_REQUEST` (default, callback receives `EZH_REQUEST_CANCELLED` on map change), `true` = `EZH_FORGET_REQUEST` (request completes after `ServerDeactivate` but callback is not invoked). The plugin passes `true` only in `plugin_end:43` so shutdown/map-ended webhooks are not lost.
+`bForget` (`bool:bForget` in `Webhook_PostPlain`/`Webhook_SendEmbedRaw`) maps to `EzHttpPluginEndBehaviour` (`easy_http.inc`): `false` = `EZH_CANCEL_REQUEST` (default, callback receives `EZH_REQUEST_CANCELLED` on map change), `true` = `EZH_FORGET_REQUEST` (request completes after `ServerDeactivate` but callback is not invoked). The plugin passes `true` only in `plugin_end` so shutdown/map-ended webhooks are not lost.
 
 `log_amx` writes to `cstrike/addons/amxmodx/logs/L<YYYYMMDD>.log` (daily log) and mirrors to console. Check `addons/amxmodx/logs/` for `[Webhook] amx_webhook_url not set` or `[Webhook] POST failed err=...`.
 
@@ -92,14 +92,24 @@ All messages are queued via `EzHttpQueue` and sent with `Content-Type: applicati
   *DEAD* (D) [TEAM] PlayerName: nice try
   PlayerName connected (5 online)
   PlayerName disconnected (4 online)
-  Plugin loaded - Server started on map `de_dust2`
-  Plugin unloaded - Server shutting down (last map: de_dust2)
+  Server started on map `de_dust2`
+  Server shutting down (last map: `de_dust2`)
   ```
-- **Embed**: map change and round win. Example round embed:
+- **Embed**: map change, round win, and map ended. Example round embed:
   ```
   Title: Round Finished
   Description: Attackers Win! Score (A/D): 7/5
   Color: 0xE74C3C
+  ```
+  Example map change / map ended embeds:
+  ```
+  Title: Map Change
+  Description: `de_dust2` -> `cs_office`
+  Color: 0x3498DB
+
+  Title: Map Ended
+  Description: `de_dust2`
+  Color: 0x95A5A6
   ```
 
 ## Compilation
@@ -144,7 +154,7 @@ No Gold Discord library, no extra dependencies other than AMXX Easy HTTP.
 
 ## Troubleshooting
 
-- **`amx_webhook_url not set - dropping`** in `cstrike/addons/amxmodx/logs/L<YYYYMMDD>.log` (also `error_*.log`, `amxx logs`) - `log_amx` always writes there - `amx_webhook_url` empty; check `webhook_reporter.cfg` and `amxx cvars`.
+- **`amx_webhook_url not set — dropping`** in `cstrike/addons/amxmodx/logs/L<YYYYMMDD>.log` (also `error_*.log`, `amxx logs`) - `log_amx` always writes there - `amx_webhook_url` empty; check `webhook_reporter.cfg` and `amxx cvars`.
 - **`easy_http` not running** -> module not in `modules.ini` or wrong binary (Linux vs Windows), check `amxx modules` and `meta list` if using Metamod.
 - **No Discord message** -> test webhook with `curl -H "Content-Type: application/json" -d '{"content":"test"}' https://discord.com/api/webhooks/...` ; check server can reach `discord.com:443` (firewall).
 - **HTTP error logged** (`[Webhook] POST failed err=... http=...` in same `L*.log`) -> see `EzHttpErrorCode` in `easy_http.inc` (`EZH_HOST_RESOLUTION_FAILURE`, `EZH_SSL_*`); check SSL deps on host.
