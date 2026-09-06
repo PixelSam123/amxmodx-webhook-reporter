@@ -1,9 +1,9 @@
+#pragma semicolon 1
+
 #include <amxmodx>
 #include <cstrike>
 #include <easy_http>
 #include <easy_http_json>
-
-#pragma semicolon 1
 
 #define PLUGIN "Discord Webhook Reporter"
 #define VERSION "1.0.0"
@@ -15,9 +15,9 @@
 
 // Task ids: never use raw player ids as task ids (collides with cfg task id 0).
 // Use a dedicated base offset per task type.
-#define TASK_CFG        9876
+#define TASK_CFG          9876
+#define TASK_ROUND        9877
 #define TASK_CONNECT_BASE 5000
-#define TASK_ROUND      9877
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
@@ -36,7 +36,7 @@ new bool:g_bPendingDraw;
 
 new EzHttpQueue:g_Queue;
 
-new g_szPlayerName[33][32];
+new g_szPlayerName[MAX_PLAYERS + 1][32];
 new g_iMsgTeamScore;
 
 public plugin_init()
@@ -84,7 +84,6 @@ public plugin_cfg()
 public Task_ReadCvarsAndHandle(iTaskId)
 {
     // iTaskId == TASK_CFG, unused except to satisfy set_task callback signature.
-    // (Taking the task id param avoids arg-count mismatch on strict cores.)
     #pragma unused iTaskId
     get_pcvar_string(g_pCvarWebhookUrl, g_szWebhookUrl, charsmax(g_szWebhookUrl));
     get_pcvar_string(g_pCvarBotName, g_szBotName, charsmax(g_szBotName));
@@ -96,19 +95,14 @@ public Task_ReadCvarsAndHandle(iTaskId)
     {
         g_bFirstCfg = false;
         copy(g_szPrevMap, charsmax(g_szPrevMap), g_szNextMap);
-        Webhook_SendPlain("Plugin loaded - Server started on map `%s`", g_szNextMap);
+        Webhook_SendPlain("Server started on map `%s`", g_szNextMap);
     }
     else
     {
         // Map change detection: plugin_cfg of new map
         if (!equal(g_szPrevMap, g_szNextMap))
         {
-            Webhook_SendEmbed(
-                "Map Change",
-                g_szPrevMap,
-                g_szNextMap,
-                0x3498DB
-            );
+            Webhook_SendMapChangeEmbed(g_szPrevMap, g_szNextMap);
             copy(g_szPrevMap, charsmax(g_szPrevMap), g_szNextMap);
         }
         // Reset map change flag after handling
@@ -144,8 +138,7 @@ public plugin_end()
     {
         get_pcvar_string(g_pCvarWebhookUrl, g_szWebhookUrl, charsmax(g_szWebhookUrl));
         trim(g_szWebhookUrl);
-        if (equal(g_szWebhookUrl, ""))
-            return;
+        if (equal(g_szWebhookUrl, "")) return;
     }
 
     new szCurrentMap[64];
@@ -155,14 +148,14 @@ public plugin_end()
     {
         // Map ended — embed
         new szDesc[128];
-        formatex(szDesc, charsmax(szDesc), "Map ended: `%s`", szCurrentMap);
+        formatex(szDesc, charsmax(szDesc), "`%s`", szCurrentMap);
         Webhook_SendEmbedRaw("Map Ended", szDesc, 0x95A5A6, true);
     }
     else
     {
         // Server shutdown / plugin unload - plain (fire-and-forget)
         new szMsg[128];
-        formatex(szMsg, charsmax(szMsg), "Plugin unloaded - Server shutting down (last map: %s)", szCurrentMap);
+        formatex(szMsg, charsmax(szMsg), "Server shutting down (last map: `%s`)", szCurrentMap);
         Webhook_PostPlain(szMsg, true);
     }
 }
@@ -171,18 +164,9 @@ public plugin_end()
 // Client connect / disconnect (non-bot only, nickname only)
 // ---------------------------------------------------------------------------
 
-public client_authorized(id)
-{
-    if (is_user_bot(id) || is_user_hltv(id))
-        return;
-    // Cache name early; name may not be fully set yet, so also update in putinserver
-    get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
-}
-
 public client_putinserver(id)
 {
-    if (is_user_bot(id) || is_user_hltv(id))
-        return;
+    if (is_user_bot(id) || is_user_hltv(id)) return;
 
     get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
 
@@ -195,13 +179,12 @@ public client_putinserver(id)
 public Task_DelayedConnect(iTaskId)
 {
     new id = iTaskId - TASK_CONNECT_BASE;
-    if (id < 1 || id > 32)
-        return;
-    if (!is_user_connected(id) || is_user_bot(id) || is_user_hltv(id))
-        return;
+    if (id < 1 || id > 32) return;
+    if (!is_user_connected(id) || is_user_bot(id) || is_user_hltv(id)) return;
+
     get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
-    if (g_szPlayerName[id][0] == EOS)
-        return;
+    if (g_szPlayerName[id][0] == EOS) return;
+
     Webhook_SendPlain("%s connected (%d online)", g_szPlayerName[id], GetRealPlayerCount());
 }
 
@@ -212,11 +195,10 @@ public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
     // Kill any pending delayed-connect so a fast rejoin doesn't emit a stale "connected".
     remove_task(id + TASK_CONNECT_BASE);
 
-    if (is_user_bot(id) || is_user_hltv(id))
-        return;
+    if (is_user_bot(id) || is_user_hltv(id)) return;
 
-    // Remaining count: leaving player is already disconnected at this point.
-    new iOnline = GetRealPlayerCount();
+    // Remaining count: leaving player hasn't disconnected at this point so minus one
+    new iOnline = GetRealPlayerCount() - 1;
 
     // g_szPlayerName still holds nickname since entity is still valid here
     if (g_szPlayerName[id][0] != EOS)
@@ -228,7 +210,9 @@ public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
         new szName[32];
         get_user_name(id, szName, charsmax(szName));
         if (szName[0] != EOS)
+        {
             Webhook_SendPlain("%s disconnected (%d online)", szName, iOnline);
+        }
     }
     g_szPlayerName[id][0] = EOS;
 }
@@ -236,10 +220,12 @@ public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
 stock GetRealPlayerCount()
 {
     new iCount = 0;
-    for (new i = 1; i <= 32; i++)
+    for (new i = 1; i <= MAX_PLAYERS; i++)
     {
         if (is_user_connected(i) && !is_user_bot(i) && !is_user_hltv(i))
+        {
             iCount++;
+        }
     }
     return iCount;
 }
@@ -251,7 +237,9 @@ stock GetRealPlayerCount()
 public OnChat(id)
 {
     if (!is_user_connected(id) || is_user_bot(id) || is_user_hltv(id))
+    {
         return PLUGIN_CONTINUE;
+    }
 
     new szRaw[192];
     read_args(szRaw, charsmax(szRaw));
@@ -259,19 +247,24 @@ public OnChat(id)
     trim(szRaw);
 
     if (szRaw[0] == EOS)
+    {
         return PLUGIN_CONTINUE;
+    }
 
-    // Strip color codes ^1-^4 (and ^x variants). Also strip !g/!y/!t common chat colors
     StripColors(szRaw, charsmax(szRaw));
     trim(szRaw);
 
     if (szRaw[0] == EOS)
+    {
         return PLUGIN_CONTINUE;
+    }
 
     // Filter chat commands: messages starting with / ! . ? @ are considered commands, not chat
     // This already covers single-char strings "/" and "!" so no separate check needed
     if (szRaw[0] == '/' || szRaw[0] == '!' || szRaw[0] == '.' || szRaw[0] == '?' || szRaw[0] == '@')
+    {
         return PLUGIN_CONTINUE;
+    }
 
     new szName[32];
     get_user_name(id, szName, charsmax(szName));
@@ -282,13 +275,21 @@ public OnChat(id)
     new szTeamPrefix[8] = "";
     new CsTeams:iTeam = cs_get_user_team(id);
     if (iTeam == CS_TEAM_T)
+    {
         copy(szTeamPrefix, charsmax(szTeamPrefix), "(A)");
+    }
     else if (iTeam == CS_TEAM_CT)
+    {
         copy(szTeamPrefix, charsmax(szTeamPrefix), "(D)");
+    }
     else if (iTeam == CS_TEAM_SPECTATOR)
+    {
         copy(szTeamPrefix, charsmax(szTeamPrefix), "(SPEC)");
+    }
     else
+    {
         copy(szTeamPrefix, charsmax(szTeamPrefix), "(SPEC)");
+    }
 
     new bool:bIsDead = !is_user_alive(id);
     // Detect if say_team was used: arg 0 is "say" or "say_team"
@@ -300,18 +301,27 @@ public OnChat(id)
     // Keep on stack small: name(32) + raw(192) + prefixes fit easily in MAX_CHAT_LEN.
     new szOut[MAX_CHAT_LEN];
     if (bIsDead && bIsTeam)
+    {
         formatex(szOut, charsmax(szOut), "*DEAD* %s [TEAM] %s: %s", szTeamPrefix, szName, szRaw);
+    }
     else if (bIsDead)
+    {
         formatex(szOut, charsmax(szOut), "*DEAD* %s %s: %s", szTeamPrefix, szName, szRaw);
+    }
     else if (bIsTeam)
+    {
         formatex(szOut, charsmax(szOut), "%s [TEAM] %s: %s", szTeamPrefix, szName, szRaw);
+    }
     else
+    {
         formatex(szOut, charsmax(szOut), "%s %s: %s", szTeamPrefix, szName, szRaw);
+    }
 
     Webhook_SendPlain("%s", szOut);
     return PLUGIN_CONTINUE;
 }
 
+// Strip color codes ^1-^4 (and ^x variants). Also strip !g/!y/!t common chat colors
 stock StripColors(szMsg[], iLen)
 {
     // Remove ^1 ^2 ^3 ^4
@@ -347,23 +357,26 @@ stock StripColors(szMsg[], iLen)
 
 public OnTeamScore(iMsgId, iDest, id)
 {
-    // Must fit "TERRORIST" + EOS. A [2] buffer truncates to "T"/"C"
-    // so both equal() checks below never matched and scores stayed 0/0.
+    // Must fit "TERRORIST" + EOS
     new szTeam[16];
     get_msg_arg_string(1, szTeam, charsmax(szTeam));
     new iScore = get_msg_arg_int(2);
 
     if (equal(szTeam, "TERRORIST"))
+    {
         g_iTScore = iScore;
+    }
     else if (equal(szTeam, "CT"))
+    {
         g_iCTScore = iScore;
+    }
 
     return PLUGIN_CONTINUE;
 }
 
 public OnTWin()
 {
-    // Terrorists = Attackers
+    // T = Attackers
     // SendAudio fires before the updated TeamScore message arrives,
     // so delay the embed to let OnTeamScore update g_iTScore/g_iCTScore first.
     g_bPendingTWin = true;
@@ -401,16 +414,31 @@ stock Webhook_SendRoundEmbed(bool:bTWin, bool:bDraw)
     new szDesc[128];
 
     if (bDraw)
+    {
         formatex(szDesc, charsmax(szDesc), "Round Draw! Score (A/D): %d/%d", g_iTScore, g_iCTScore);
+    }
     else if (bTWin)
+    {
         formatex(szDesc, charsmax(szDesc), "Attackers Win! Score (A/D): %d/%d", g_iTScore, g_iCTScore);
+    }
     else
+    {
         formatex(szDesc, charsmax(szDesc), "Defenders Win! Score (A/D): %d/%d", g_iTScore, g_iCTScore);
+    }
 
     new iColor;
-    if (bDraw) iColor = 0x95A5A6;
-    else if (bTWin) iColor = 0xE74C3C; // red for Attackers
-    else iColor = 0x3498DB; // blue for Defenders
+    if (bDraw)
+    {
+        iColor = 0x95A5A6;
+    }
+    else if (bTWin)
+    {
+        iColor = 0xE74C3C; // red for Attackers
+    }
+    else
+    {
+        iColor = 0x3498DB; // blue for Defenders
+    }
 
     Webhook_SendEmbedRaw(szTitle, szDesc, iColor, false);
 }
@@ -445,9 +473,6 @@ stock Webhook_PostPlain(const szContent[], bool:bForget)
         }
     }
 
-    // NOTE: no manual JsonEscape — ezjson_object_set_string() escapes internally.
-    // Manual escaping doubled backslashes/quotes AND cost a 3800-cell stack buffer
-    // (run time error 3: stack error at old line 389).
     new EzJSON:obj = ezjson_init_object();
     if (obj == EzInvalid_JSON)
     {
@@ -457,30 +482,36 @@ stock Webhook_PostPlain(const szContent[], bool:bForget)
 
     ezjson_object_set_string(obj, "content", szContent);
     if (g_szBotName[0] != EOS)
+    {
         ezjson_object_set_string(obj, "username", g_szBotName);
+    }
 
     new EzHttpOptions:opts = ezhttp_create_options();
     ezhttp_option_set_header(opts, "Content-Type", "application/json");
     ezhttp_option_set_body_from_json(opts, obj, false);
+    ezjson_free(obj);
+
     ezhttp_option_set_queue(opts, g_Queue);
     if (bForget)
+    {
         ezhttp_option_set_plugin_end_behaviour(opts, EZH_FORGET_REQUEST);
+    }
 
     ezhttp_post(g_szWebhookUrl, "OnHttpComplete", opts);
 
-    ezjson_free(obj);
-    // opts auto-destroy
+    // opts variable auto-destroys itself
 }
 
 // Embed for map change (prev -> next)
-stock Webhook_SendEmbed(const szTitle[], const szPrev[], const szNext[], iColor)
+stock Webhook_SendMapChangeEmbed(const szPrev[], const szNext[])
 {
     new szDesc[192];
-    formatex(szDesc, charsmax(szDesc), "Map changed: `%s` -> `%s`", szPrev, szNext);
-    Webhook_SendEmbedRaw(szTitle, szDesc, iColor, false);
+    formatex(szDesc, charsmax(szDesc), "`%s` -> `%s`", szPrev, szNext);
+    Webhook_SendEmbedRaw("Map Change", szDesc, 0x3498DB, false);
 }
 
-stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget) // see bForget doc on Webhook_PostPlain
+// see bForget doc on Webhook_PostPlain
+stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget)
 {
     if (equal(g_szWebhookUrl, ""))
     {
@@ -522,7 +553,9 @@ stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget
     ezjson_free(arr);
 
     if (g_szBotName[0] != EOS)
+    {
         ezjson_object_set_string(obj, "username", g_szBotName);
+    }
 
     new EzHttpOptions:opts = ezhttp_create_options();
     ezhttp_option_set_header(opts, "Content-Type", "application/json");
@@ -531,7 +564,9 @@ stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget
 
     ezhttp_option_set_queue(opts, g_Queue);
     if (bForget)
+    {
         ezhttp_option_set_plugin_end_behaviour(opts, EZH_FORGET_REQUEST);
+    }
 
     ezhttp_post(g_szWebhookUrl, "OnHttpComplete", opts);
 }
