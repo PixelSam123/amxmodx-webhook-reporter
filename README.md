@@ -12,6 +12,7 @@ CS 1.6 AMX Mod X plugin that forwards server events to a Discord webhook. Uses [
 - **Player chat** - plain text for `say` and `say_team` with prefixes: `(A)` for Attackers (T), `(D)` for Defenders (CT), `(SPEC)` for spectators, `*DEAD*` when dead, `[TEAM]` for team chat; `(SPEC)` is also used for unassigned players. Strips color codes `^0-^9`/`!g`/`!y`/`!t`, collapses double spaces, and ignores chat commands starting with `/ ! . ? @`
 - **Round finished** - embed `Attackers Win! / Defenders Win! / Round Draw! Score (A/D): T/CT` with color (red `0xE74C3C` for Attackers, blue `0x3498DB` for Defenders, grey `0x95A5A6` for draw) and tracked via `TeamScore` message
 - **Halftime (PugMod)** - embed `Halftime — Teams are switching sides... / Overtime begins...` (orange `0xE67E22`) when [SmileYzn/PugMod](https://github.com/SmileYzn/PugMod) executes halftime, detected from its `SayText` state messages (fallback: round counting via `pug_rounds` / `pug_rounds_ot`); after a real side swap the cumulative Attackers/Defenders win counts follow the teams to their new slots, so round embeds keep showing correct match score in regulation and overtime
+- **Match restarted / cancelled (PugMod)** - embeds (yellow `0xF1C40F` / grey `0x95A5A6`) carrying the score at the moment of the event, detected from both the vote messages (`The match will be restarted/cancelled.`) and the admin menu message (`State changed: ...`); cumulative score and halftime state reset, queued round/halftime embeds dropped
 
 No `@mentions`, no SteamID/IP/hostname broadcasting.
 
@@ -121,6 +122,14 @@ All messages are queued via `EzHttpQueue` and sent with `Content-Type: applicati
   Title: Halftime
   Description: Halftime — teams keep their sides. Overtime begins. Score (A/D): 15/15
   Color: 0xE67E22
+
+  Title: Match Restarted
+  Description: A new match will start shortly. Score was (A/D): 6/4
+  Color: 0xF1C40F
+
+  Title: Match Cancelled
+  Description: The match was cancelled. Final score (A/D): 6/4
+  Color: 0x95A5A6
   ```
 
 ## Compilation
@@ -178,7 +187,8 @@ No Gold Discord library, no extra dependencies other than AMXX Easy HTTP.
 - PugMod halftime: PugMod exposes no dedicated halftime event, so halftime is detected from its `SayText` broadcasts (`CPugMod::SwapTeams` prints `Automatically swapping teams.` only when sides really switch; state changes print `<State> started: Get ready!!`). SayText is sent `MSG_ONE` per client, so identical text in the same game-tick is deduped. Match strings are hardcoded English in the mod.
 - PugMod scores: at halftime the mod resets team slots to `0/0` (`m_bCompleteReset` + `SwapAllPlayers`, which itself swaps then zeroes slot wins) and with `pug_score_teams 1` rewrites outgoing `TeamScore` args - the plugin's own totals (`g_iTotalT` / `g_iTotalCT`) avoid depending on meta message-hook ordering. Winner attribution stays slot-based (`SendAudio` terwin/ctwin always describe the current T/CT slot); the halftime **swap of the cumulative totals** (not inverted increments) keeps them following the player group, matching the TAB scoreboard. A tied score entering overtime gets a "keeps their sides" halftime embed with no swap (PugMod skips `SwapAllPlayers` when tied).
 - PugMod live gating: round embeds/score counting are only enabled between `First Half / Second Half / Overtime started` and `Halftime` / end-of-game messages, which excludes knife rounds, voting freezes and DM mode.
-- PugMod fallback (SayText never seen on this map, e.g. another halftime system with the same cvars): halftime is inferred after `pug_rounds / 2` round wins per regulation half and `pug_rounds_ot / 2` per overtime half (halftime #3+ = OT). Limitation: it assumes a swap at every halftime and counts knife-round wins, so the knife-round feature can shift it by one round.
+- PugMod restart/cancel: the vote paths print `The match will be restarted.` / `The match will be cancelled.`, the admin menu instead prints `State changed: First Half.` / `State changed: Dead.` (all SayText, color control bytes stripped by `StripSayControl` before matching; `Dead` never matches inside `Deathmatch`). An embed is posted only when a match was actually in progress (`g_bPugLive`, cumulative totals or half count > 0); `g_bMatchEventGuard` suppresses the double message of the admin flow. Scores, halftime counters and pending `TASK_ROUND`/`TASK_HALFTIME` embeds are dropped immediately. `First Half started` is the authoritative reset: it always zeroes cumulative totals (safety net if the restart message is missed) and releases the guard.
+- PugMod fallback (SayText never seen on this map, e.g. another halftime system with the same cvars): halftime is inferred after `pug_rounds / 2` round wins per regulation half and `pug_rounds_ot / 2` per overtime half (halftime #3+ = OT). Limitations: it assumes a swap at every halftime, counts knife-round wins (so the knife-round feature can shift it by one round), and cannot detect restart/cancel at all.
 - All PugMod/halftime state resets in `plugin_cfg` (`Task_ReadCvarsAndHandle`), including mid-map plugin loads; `Pug_ReadConfig` reads `pug_rounds` / `pug_rounds_ot` via `get_cvar_pointer` each map.
 - Map vs shutdown: `g_bChangingMap` set by `server_changelevel()` and `changelevel`/`map`/`amx_map` command hooks; `plugin_end` sends `Map Ended` embed if true else `Server shutting down` plain.
 - Hungarian notation: `g_i*`, `g_sz*`, `g_b*`, `g_p*`, `g_Queue`.

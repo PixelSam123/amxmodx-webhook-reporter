@@ -6,7 +6,7 @@
 #include <easy_http_json>
 
 #define PLUGIN "Discord Webhook Reporter"
-#define VERSION "1.1.0"
+#define VERSION "1.2.0"
 #define AUTHOR "PixelSam123"
 
 #define MAX_WEBHOOK_URL 512
@@ -21,6 +21,8 @@
 #define TASK_CONNECT_BASE 5000
 
 #define COLOR_HALFTIME    0xE67E22
+#define COLOR_RESTART     0xF1C40F
+#define COLOR_CANCEL      0x95A5A6
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
@@ -60,6 +62,9 @@ new g_iPugHalfRounds;
 new g_iPugHalfTimes;
 new bool:g_bHalftimePending;
 new bool:g_bHalftimeSwap;
+// Guards duplicate restart/cancel embeds while the resulting state transition
+// ("First Half started" / next match) is still pending.
+new bool:g_bMatchEventGuard;
 
 public plugin_init()
 {
@@ -154,6 +159,7 @@ public Task_ReadCvarsAndHandle(iTaskId)
     g_bPendingDraw = false;
     g_bHalftimePending = false;
     g_bHalftimeSwap = false;
+    g_bMatchEventGuard = false;
     // Drop any pending round/halftime embed from the previous map so it
     // doesn't fire with reset scores on the new map.
     remove_task(TASK_ROUND);
@@ -500,6 +506,41 @@ stock Pug_ReadConfig()
     }
 }
 
+// Zero cumulative score + per-half state and drop pending round/halftime
+// embeds, so a restart/cancel cannot leave stale messages queued.
+stock Pug_ResetMatchScore()
+{
+    g_iTotalT = 0;
+    g_iTotalCT = 0;
+    g_iPugHalfRounds = 0;
+    g_iPugHalfTimes = 0;
+    g_bPendingTWin = false;
+    g_bPendingDraw = false;
+    g_bHalftimePending = false;
+    g_bHalftimeSwap = false;
+    remove_task(TASK_ROUND);
+    remove_task(TASK_HALFTIME);
+}
+
+// In-place removal of HL color control bytes (0x01-0x04) that PugMod's
+// PrintColor injects mid-phrase (e.g. "State changed: \x03Dead."), plus
+// literal ^1-^4 remnants, so substring matching sees contiguous text.
+stock StripSayControl(szMsg[], iLen)
+{
+    new iOut = 0;
+    for (new i = 0; i <= iLen && szMsg[i]; i++)
+    {
+        if (szMsg[i] >= 0x01 && szMsg[i] <= 0x04) continue;
+        szMsg[iOut++] = szMsg[i];
+    }
+    szMsg[iOut] = EOS;
+
+    replace_all(szMsg, iLen, "^1", "");
+    replace_all(szMsg, iLen, "^2", "");
+    replace_all(szMsg, iLen, "^3", "");
+    replace_all(szMsg, iLen, "^4", "");
+}
+
 // Fallback halftime: PugMod switches sides after pug_rounds/2 wins in each
 // regulation half and after pug_rounds_ot/2 wins in each overtime half.
 // Only counts T/CT round wins (draws and knife rounds do not score).
@@ -548,6 +589,9 @@ public OnSayText(iMsgId, iDest, id)
     fLastTime = ftNow;
     copy(szLastText, charsmax(szLastText), szText);
 
+    // PrintColor embeds color bytes inside the text — normalize before matching.
+    StripSayControl(szText, charsmax(szText));
+
     // Hardcoded English in PugMod's CPugMod::SwapTeams — printed only when
     // sides actually switch (not on the tied regulation -> overtime halftime).
     if (containi(szText, "swapping teams") != -1)
@@ -560,8 +604,55 @@ public OnSayText(iMsgId, iDest, id)
         return PLUGIN_CONTINUE;
     }
 
-    // State transitions: "[TAG] <State> started: Get ready!!" (color codes are
-    // interleaved, so "Halftime started" is not contiguous — match parts).
+    // Match restart: vote path prints "The match will be restarted." then
+    // transitions to FIRST_HALF; the admin menu prints "State changed: First
+    // Half." instead. The following "First Half started" is the authoritative
+    // reset either way — this branch adds the embed and kills stale tasks.
+    if (containi(szText, "match will be restarted") != -1
+        || (containi(szText, "State changed") != -1 && containi(szText, "First Half") != -1))
+    {
+        g_bPugMode = true;
+        g_bPugSaySeen = true;
+
+        // Only report when a match was actually in progress: an admin forcing
+        // First Half during the ready phase is not a restart.
+        if (!g_bMatchEventGuard && (g_bPugLive || g_iPugHalfTimes > 0 || g_iTotalT > 0 || g_iTotalCT > 0))
+        {
+            new szDesc[192];
+            formatex(szDesc, charsmax(szDesc), "A new match will start shortly. Score was (A/D): %d/%d", g_iTotalT, g_iTotalCT);
+            Webhook_SendEmbedRaw("Match Restarted", szDesc, COLOR_RESTART, false);
+        }
+
+        g_bMatchEventGuard = true;
+        g_bPugLive = false;
+        Pug_ResetMatchScore();
+        return PLUGIN_CONTINUE;
+    }
+
+    // Match cancel: vote path prints "The match will be cancelled." then goes
+    // DEATHMATCH; admin menu prints "State changed: Dead." then DEAD.
+    // "Dead" never matches inside "Deathmatch", so the admin branch is precise.
+    if (containi(szText, "match will be cancelled") != -1
+        || (containi(szText, "State changed") != -1 && containi(szText, "Dead") != -1))
+    {
+        g_bPugMode = true;
+        g_bPugSaySeen = true;
+
+        if (!g_bMatchEventGuard && (g_bPugLive || g_iPugHalfTimes > 0 || g_iTotalT > 0 || g_iTotalCT > 0))
+        {
+            new szDesc[192];
+            formatex(szDesc, charsmax(szDesc), "The match was cancelled. Final score (A/D): %d/%d", g_iTotalT, g_iTotalCT);
+            Webhook_SendEmbedRaw("Match Cancelled", szDesc, COLOR_CANCEL, false);
+        }
+
+        g_bMatchEventGuard = true;
+        g_bPugLive = false;
+        Pug_ResetMatchScore();
+        return PLUGIN_CONTINUE;
+    }
+
+    // State transitions: "[TAG] <State> started: Get ready!!" (color codes used
+    // to split phrases — text is normalized above).
     if (containi(szText, "started: Get ready") != -1)
     {
         g_bPugMode = true;
@@ -581,8 +672,16 @@ public OnSayText(iMsgId, iDest, id)
 
         // Knife round / captain picks also print "started: Get ready" — only
         // scoring halves count as live.
-        if (containi(szText, "First Half") != -1 || containi(szText, "Second Half") != -1
-            || containi(szText, "Overtime") != -1)
+        if (containi(szText, "First Half") != -1)
+        {
+            // First Half always marks a fresh match start: authoritative reset
+            // of cumulative totals (covers restart/cancel) and releases the
+            // restart/cancel embed guard for the new match.
+            g_bPugLive = true;
+            Pug_ResetMatchScore();
+            g_bMatchEventGuard = false;
+        }
+        else if (containi(szText, "Second Half") != -1 || containi(szText, "Overtime") != -1)
         {
             g_bPugLive = true;
             g_iPugHalfRounds = 0;
