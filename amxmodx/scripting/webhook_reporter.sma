@@ -6,7 +6,7 @@
 #include <easy_http_json>
 
 #define PLUGIN "Discord Webhook Reporter"
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 #define AUTHOR "PixelSam123"
 
 #define MAX_WEBHOOK_URL 512
@@ -17,7 +17,10 @@
 // Use a dedicated base offset per task type.
 #define TASK_CFG          9876
 #define TASK_ROUND        9877
+#define TASK_HALFTIME     9878
 #define TASK_CONNECT_BASE 5000
+
+#define COLOR_HALFTIME    0xE67E22
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
@@ -38,6 +41,25 @@ new EzHttpQueue:g_Queue;
 
 new g_szPlayerName[MAX_PLAYERS + 1][32];
 new g_iMsgTeamScore;
+new g_iMsgSayText;
+
+// PugMod (SmileYzn/PugMod) halftime handling.
+// g_bPugMode: use plugin-side cumulative totals instead of TeamScore messages
+// (PugMod zeroes team slots at halftime via m_bCompleteReset and rewrites the
+// TeamScore message args when pug_score_teams=1, so the raw message is not a
+// reliable score source). Cumulative totals live in g_iTotalT/g_iTotalCT.
+new bool:g_bPugMode;
+new bool:g_bPugFallback;
+new bool:g_bPugSaySeen;
+new bool:g_bPugLive;
+new g_iTotalT;
+new g_iTotalCT;
+new g_iPugRegHalf;
+new g_iPugOTHalf;
+new g_iPugHalfRounds;
+new g_iPugHalfTimes;
+new bool:g_bHalftimePending;
+new bool:g_bHalftimeSwap;
 
 public plugin_init()
 {
@@ -48,6 +70,14 @@ public plugin_init()
 
     g_Queue = ezhttp_create_queue();
     g_iMsgTeamScore = get_user_msgid("TeamScore");
+    g_iMsgSayText   = get_user_msgid("SayText");
+
+    // PugMod broadcasts its state transitions via SayText ("... started: Get ready!!",
+    // "Automatically swapping teams.") — used for halftime detection + live gating.
+    if (g_iMsgSayText > 0)
+    {
+        register_message(g_iMsgSayText, "OnSayText");
+    }
 
     register_clcmd("say", "OnChat");
     register_clcmd("say_team", "OnChat");
@@ -107,13 +137,28 @@ public Task_ReadCvarsAndHandle(iTaskId)
         }
         // Reset map change flag after handling
         g_bChangingMap = false;
-        // Scores reset on new map (engine resets, but we also reset for safety)
-        g_iTScore = 0;
-        g_iCTScore = 0;
-        // Drop any pending round embed from the previous map so it
-        // doesn't fire with reset scores on the new map.
-        remove_task(TASK_ROUND);
     }
+
+    // Reset score/round tracking. Done on every plugin_cfg (including a mid-map
+    // load) so PugMod detection + per-half state always starts clean.
+    // Scores reset on new map (engine resets, but we also reset for safety)
+    g_iTScore = 0;
+    g_iCTScore = 0;
+    g_iTotalT = 0;
+    g_iTotalCT = 0;
+    g_iPugHalfRounds = 0;
+    g_iPugHalfTimes = 0;
+    g_bPugLive = false;
+    g_bPugSaySeen = false;
+    g_bPendingTWin = false;
+    g_bPendingDraw = false;
+    g_bHalftimePending = false;
+    g_bHalftimeSwap = false;
+    // Drop any pending round/halftime embed from the previous map so it
+    // doesn't fire with reset scores on the new map.
+    remove_task(TASK_ROUND);
+    remove_task(TASK_HALFTIME);
+    Pug_ReadConfig();
 }
 
 public server_changelevel(szMap[])
@@ -376,7 +421,16 @@ public OnTeamScore(iMsgId, iDest, id)
 
 public OnTWin()
 {
-    // T = Attackers
+    // T = Attackers. Under PugMod, suppress knife round / dead-phase audio wins
+    // (live flag only set while a half is being played).
+    if (g_bPugMode && g_bPugSaySeen && !g_bPugLive) return;
+
+    if (g_bPugMode)
+    {
+        g_iTotalT++;
+        Pug_CountRegulationRound();
+    }
+
     // SendAudio fires before the updated TeamScore message arrives,
     // so delay the embed to let OnTeamScore update g_iTScore/g_iCTScore first.
     g_bPendingTWin = true;
@@ -388,6 +442,14 @@ public OnTWin()
 public OnCTWin()
 {
     // CT = Defenders
+    if (g_bPugMode && g_bPugSaySeen && !g_bPugLive) return;
+
+    if (g_bPugMode)
+    {
+        g_iTotalCT++;
+        Pug_CountRegulationRound();
+    }
+
     g_bPendingTWin = false;
     g_bPendingDraw = false;
     remove_task(TASK_ROUND);
@@ -396,6 +458,8 @@ public OnCTWin()
 
 public OnRoundDraw()
 {
+    if (g_bPugMode && g_bPugSaySeen && !g_bPugLive) return;
+
     g_bPendingTWin = false;
     g_bPendingDraw = true;
     remove_task(TASK_ROUND);
@@ -408,22 +472,208 @@ public Task_SendRoundEmbed(iTaskId)
     Webhook_SendRoundEmbed(g_bPendingTWin, g_bPendingDraw);
 }
 
+// ---------------------------------------------------------------------------
+// PugMod halftime (SmileYzn/PugMod) — detection + side swap + cumulative score
+// ---------------------------------------------------------------------------
+
+// Read pug_rounds / pug_rounds_ot; when present, enable cumulative match-score
+// tracking and the fallback halftime calculation (no dedicated halftime event
+// exists in PugMod, but it always prints SayText state messages — fallback only
+// kicks in while none of them have been observed on this map).
+stock Pug_ReadConfig()
+{
+    new pRounds = get_cvar_pointer("pug_rounds");
+    new pRoundsOT = get_cvar_pointer("pug_rounds_ot");
+
+    g_bPugFallback = false;
+
+    if (pRounds != -1 && pRoundsOT != -1)
+    {
+        g_iPugRegHalf = get_pcvar_num(pRounds) / 2;
+        g_iPugOTHalf = get_pcvar_num(pRoundsOT) / 2;
+
+        if (g_iPugRegHalf > 0)
+        {
+            g_bPugFallback = true;
+            g_bPugMode = true;
+        }
+    }
+}
+
+// Fallback halftime: PugMod switches sides after pug_rounds/2 wins in each
+// regulation half and after pug_rounds_ot/2 wins in each overtime half.
+// Only counts T/CT round wins (draws and knife rounds do not score).
+stock Pug_CountRegulationRound()
+{
+    if (!g_bPugFallback || g_bPugSaySeen) return;
+
+    g_iPugHalfRounds++;
+
+    new iThreshold = (g_iPugHalfTimes >= 2) ? g_iPugOTHalf : g_iPugRegHalf;
+
+    if (iThreshold > 0 && g_iPugHalfRounds >= iThreshold)
+    {
+        g_bHalftimeSwap = true;
+        g_bHalftimePending = true;
+        // Fire after the 1.0s round-finished embed so Discord sees the round
+        // first, then halftime.
+        set_task(1.5, "Task_Halftime", TASK_HALFTIME);
+    }
+}
+
+public OnSayText(iMsgId, iDest, id)
+{
+    #pragma unused iMsgId, iDest, id
+
+    // SayText args: 1 = sender index, 2 = format ("%s"), 3 = message
+    new szText[192];
+    get_msg_arg_string(3, szText, charsmax(szText));
+
+    if (szText[0] == EOS)
+    {
+        return PLUGIN_CONTINUE;
+    }
+
+    // PugMod sends state messages MSG_ONE per client: identical text arrives
+    // once per recipient within the same frame — dedupe on text + gametime.
+    static Float:fLastTime = -1.0;
+    static szLastText[192];
+    new Float:ftNow = get_gametime();
+
+    if (ftNow == fLastTime && equal(szLastText, szText))
+    {
+        return PLUGIN_CONTINUE;
+    }
+
+    fLastTime = ftNow;
+    copy(szLastText, charsmax(szLastText), szText);
+
+    // Hardcoded English in PugMod's CPugMod::SwapTeams — printed only when
+    // sides actually switch (not on the tied regulation -> overtime halftime).
+    if (containi(szText, "swapping teams") != -1)
+    {
+        g_bPugMode = true;
+        g_bPugSaySeen = true;
+        g_bHalftimeSwap = true;
+        g_bHalftimePending = true;
+        set_task(0.5, "Task_Halftime", TASK_HALFTIME);
+        return PLUGIN_CONTINUE;
+    }
+
+    // State transitions: "[TAG] <State> started: Get ready!!" (color codes are
+    // interleaved, so "Halftime started" is not contiguous — match parts).
+    if (containi(szText, "started: Get ready") != -1)
+    {
+        g_bPugMode = true;
+        g_bPugSaySeen = true;
+
+        if (containi(szText, "Halftime") != -1)
+        {
+            // Swap message may have already scheduled this halftime; do not
+            // overwrite its swap flag or restart the timer pointlessly.
+            if (!g_bHalftimePending)
+            {
+                g_bHalftimePending = true;
+                set_task(0.5, "Task_Halftime", TASK_HALFTIME);
+            }
+            return PLUGIN_CONTINUE;
+        }
+
+        // Knife round / captain picks also print "started: Get ready" — only
+        // scoring halves count as live.
+        if (containi(szText, "First Half") != -1 || containi(szText, "Second Half") != -1
+            || containi(szText, "Overtime") != -1)
+        {
+            g_bPugLive = true;
+            g_iPugHalfRounds = 0;
+        }
+
+        return PLUGIN_CONTINUE;
+    }
+
+    if (containi(szText, "End of game") != -1 || containi(szText, "Game Over") != -1)
+    {
+        g_bPugMode = true;
+        g_bPugLive = false;
+        // A halftime announced right before the match ended should not fire
+        // (e.g. tie votes ending the game during the halftime pause).
+        if (g_bHalftimePending)
+        {
+            g_bHalftimePending = false;
+            g_bHalftimeSwap = false;
+            remove_task(TASK_HALFTIME);
+        }
+    }
+
+    return PLUGIN_CONTINUE;
+}
+
+public Task_Halftime(iTaskId)
+{
+    #pragma unused iTaskId
+
+    if (!g_bHalftimePending) return;
+
+    g_bHalftimePending = false;
+
+    new bool:bSwap = g_bHalftimeSwap;
+    g_bHalftimeSwap = false;
+
+    g_bPugLive = false;
+    g_iPugHalfRounds = 0;
+    g_iPugHalfTimes++;
+
+    new szDesc[192];
+
+    if (bSwap)
+    {
+        formatex(
+            szDesc, charsmax(szDesc),
+            "Teams are switching sides. %s (A/D): %d/%d",
+            (g_iPugHalfTimes == 1) ? "First half score" : "Score so far", g_iTotalT, g_iTotalCT
+        );
+
+        // Follow the sides across the swap: totals belong to the player group,
+        // so exchanging them keeps them aligned with the current T/CT slots
+        // (same semantics as PugMod's SWAP(m_Score[TERRORIST], m_Score[CT]) and
+        // ReGameDLL's SwapAllPlayers).
+        new iTemp = g_iTotalT;
+        g_iTotalT = g_iTotalCT;
+        g_iTotalCT = iTemp;
+    }
+    else
+    {
+        formatex(
+            szDesc, charsmax(szDesc),
+            "Halftime — teams keep their sides. Overtime begins. Score (A/D): %d/%d",
+            g_iTotalT, g_iTotalCT
+        );
+    }
+
+    Webhook_SendEmbedRaw("Halftime", szDesc, COLOR_HALFTIME, false);
+}
+
 stock Webhook_SendRoundEmbed(bool:bTWin, bool:bDraw)
 {
     new szTitle[32] = "Round Finished";
     new szDesc[128];
 
+    // Under PugMod the game zeroes team scores at each halftime, so report the
+    // plugin-side cumulative totals (which follow the player group across swaps).
+    new iA = g_bPugMode ? g_iTotalT : g_iTScore;
+    new iD = g_bPugMode ? g_iTotalCT : g_iCTScore;
+
     if (bDraw)
     {
-        formatex(szDesc, charsmax(szDesc), "Round Draw! Score (A/D): %d/%d", g_iTScore, g_iCTScore);
+        formatex(szDesc, charsmax(szDesc), "Round Draw! Score (A/D): %d/%d", iA, iD);
     }
     else if (bTWin)
     {
-        formatex(szDesc, charsmax(szDesc), "Attackers Win! Score (A/D): %d/%d", g_iTScore, g_iCTScore);
+        formatex(szDesc, charsmax(szDesc), "Attackers Win! Score (A/D): %d/%d", iA, iD);
     }
     else
     {
-        formatex(szDesc, charsmax(szDesc), "Defenders Win! Score (A/D): %d/%d", g_iTScore, g_iCTScore);
+        formatex(szDesc, charsmax(szDesc), "Defenders Win! Score (A/D): %d/%d", iA, iD);
     }
 
     new iColor;

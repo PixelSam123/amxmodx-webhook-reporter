@@ -11,6 +11,7 @@ CS 1.6 AMX Mod X plugin that forwards server events to a Discord webhook. Uses [
 - **Player disconnected** - plain text, non-bot only, nickname only, includes remaining real-player count e.g. `Nick disconnected (2 online)`
 - **Player chat** - plain text for `say` and `say_team` with prefixes: `(A)` for Attackers (T), `(D)` for Defenders (CT), `(SPEC)` for spectators, `*DEAD*` when dead, `[TEAM]` for team chat; `(SPEC)` is also used for unassigned players. Strips color codes `^0-^9`/`!g`/`!y`/`!t`, collapses double spaces, and ignores chat commands starting with `/ ! . ? @`
 - **Round finished** - embed `Attackers Win! / Defenders Win! / Round Draw! Score (A/D): T/CT` with color (red `0xE74C3C` for Attackers, blue `0x3498DB` for Defenders, grey `0x95A5A6` for draw) and tracked via `TeamScore` message
+- **Halftime (PugMod)** - embed `Halftime — Teams are switching sides... / Overtime begins...` (orange `0xE67E22`) when [SmileYzn/PugMod](https://github.com/SmileYzn/PugMod) executes halftime, detected from its `SayText` state messages (fallback: round counting via `pug_rounds` / `pug_rounds_ot`); after a real side swap the cumulative Attackers/Defenders win counts follow the teams to their new slots, so round embeds keep showing correct match score in regulation and overtime
 
 No `@mentions`, no SteamID/IP/hostname broadcasting.
 
@@ -111,6 +112,16 @@ All messages are queued via `EzHttpQueue` and sent with `Content-Type: applicati
   Description: `de_dust2`
   Color: 0x95A5A6
   ```
+  Example halftime embeds (PugMod):
+  ```
+  Title: Halftime
+  Description: Teams are switching sides. First half score (A/D): 8/7
+  Color: 0xE67E22
+
+  Title: Halftime
+  Description: Halftime — teams keep their sides. Overtime begins. Score (A/D): 15/15
+  Color: 0xE67E22
+  ```
 
 ## Compilation
 
@@ -163,7 +174,12 @@ No Gold Discord library, no extra dependencies other than AMXX Easy HTTP.
 
 ## Internals
 
-- Scores: `g_iTScore` / `g_iCTScore` updated from `TeamScore` message (`register_message`), used in round-win embeds.
+- Scores: `g_iTScore` / `g_iCTScore` updated from `TeamScore` message (`register_message`), used in round-win embeds. Under PugMod (auto-detected), round-win embeds instead use cumulative `g_iTotalT` / `g_iTotalCT`.
+- PugMod halftime: PugMod exposes no dedicated halftime event, so halftime is detected from its `SayText` broadcasts (`CPugMod::SwapTeams` prints `Automatically swapping teams.` only when sides really switch; state changes print `<State> started: Get ready!!`). SayText is sent `MSG_ONE` per client, so identical text in the same game-tick is deduped. Match strings are hardcoded English in the mod.
+- PugMod scores: at halftime the mod resets team slots to `0/0` (`m_bCompleteReset` + `SwapAllPlayers`, which itself swaps then zeroes slot wins) and with `pug_score_teams 1` rewrites outgoing `TeamScore` args - the plugin's own totals (`g_iTotalT` / `g_iTotalCT`) avoid depending on meta message-hook ordering. Winner attribution stays slot-based (`SendAudio` terwin/ctwin always describe the current T/CT slot); the halftime **swap of the cumulative totals** (not inverted increments) keeps them following the player group, matching the TAB scoreboard. A tied score entering overtime gets a "keeps their sides" halftime embed with no swap (PugMod skips `SwapAllPlayers` when tied).
+- PugMod live gating: round embeds/score counting are only enabled between `First Half / Second Half / Overtime started` and `Halftime` / end-of-game messages, which excludes knife rounds, voting freezes and DM mode.
+- PugMod fallback (SayText never seen on this map, e.g. another halftime system with the same cvars): halftime is inferred after `pug_rounds / 2` round wins per regulation half and `pug_rounds_ot / 2` per overtime half (halftime #3+ = OT). Limitation: it assumes a swap at every halftime and counts knife-round wins, so the knife-round feature can shift it by one round.
+- All PugMod/halftime state resets in `plugin_cfg` (`Task_ReadCvarsAndHandle`), including mid-map plugin loads; `Pug_ReadConfig` reads `pug_rounds` / `pug_rounds_ot` via `get_cvar_pointer` each map.
 - Map vs shutdown: `g_bChangingMap` set by `server_changelevel()` and `changelevel`/`map`/`amx_map` command hooks; `plugin_end` sends `Map Ended` embed if true else `Server shutting down` plain.
 - Hungarian notation: `g_i*`, `g_sz*`, `g_b*`, `g_p*`, `g_Queue`.
 
