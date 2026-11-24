@@ -1,4 +1,6 @@
-﻿# AMX Mod X - Webhook Reporter
+# AMX Mod X - Webhook Reporter
+
+[![Build](https://github.com/PixelSam123/amxmodx-webhook-reporter/actions/workflows/build.yml/badge.svg)](https://github.com/PixelSam123/amxmodx-webhook-reporter/actions/workflows/build.yml)
 
 CS 1.6 AMX Mod X plugin that forwards server events to a Discord webhook. Uses [AmxxEasyHttp](https://github.com/Next21Team/AmxxEasyHttp) for HTTPS.
 
@@ -11,14 +13,14 @@ CS 1.6 AMX Mod X plugin that forwards server events to a Discord webhook. Uses [
 - **Player disconnected** - plain text, non-bot only, nickname only, includes remaining real-player count e.g. `Nick disconnected (2 online)`
 - **Player chat** - plain text for `say` and `say_team` with prefixes: `(A)` for Attackers (T), `(D)` for Defenders (CT), `(SPEC)` for spectators, `*DEAD*` when dead, `[TEAM]` for team chat; `(SPEC)` is also used for unassigned players. Strips color codes `^0-^9`/`!g`/`!y`/`!t`, collapses double spaces, and ignores chat commands starting with `/ ! . ? @`
 - **Round finished** - embed `Attackers Win! / Defenders Win! / Round Draw! Score (A/D): T/CT` with color (red `0xE74C3C` for Attackers, blue `0x3498DB` for Defenders, grey `0x95A5A6` for draw) and tracked via `TeamScore` message
-- **Halftime (PugMod)** - embed `Halftime — Teams are switching sides... / Overtime begins...` (orange `0xE67E22`) when [SmileYzn/PugMod](https://github.com/SmileYzn/PugMod) executes halftime, detected from its `pug_state` cvar (fallback: round counting via `pug_rounds` / `pug_rounds_ot` when `pug_state` is unavailable); after a real side swap the cumulative Attackers/Defenders win counts follow the teams to their new slots, so round embeds keep showing correct match score in regulation and overtime
+- **Halftime (PugMod)** - embed `Halftime - Teams are switching sides... / Overtime begins...` (orange `0xE67E22`) when [SmileYzn/PugMod](https://github.com/SmileYzn/PugMod) executes halftime, detected from its `pug_state` cvar (fallback: round counting via `pug_rounds` / `pug_rounds_ot` when `pug_state` is unavailable); after a real side swap the cumulative Attackers/Defenders win counts follow the teams to their new slots, so round embeds keep showing correct match score in regulation and overtime
 - **Match restarted / cancelled (PugMod)** - embeds (yellow `0xF1C40F` / grey `0x95A5A6`) carrying the score at the moment of the event, detected from `pug_state` transitions (`First Half` while a match is in progress, `Deathmatch` / `Dead` while a match is in progress); cumulative score and halftime state reset, queued round/halftime embeds dropped
 
 No `@mentions`, no SteamID/IP/hostname broadcasting.
 
 ## Requirements
 
-- AMX Mod X 1.9+ recommended (1.8.3 partially supported - 32-char native limit)
+- AMX Mod X 1.9+ (tested with 1.10)
 - `AmxxEasyHttp` 1.5.0+ module (`easy_http_amxx_i386.so` / `easy_http_amxx.dll`)
 - Discord webhook URL
 
@@ -45,10 +47,12 @@ No `@mentions`, no SteamID/IP/hostname broadcasting.
 
    Copy to server (paths are relative to `cstrike/`):
    ```
-   amxmodx/scripting/webhook_reporter.sma          -> (source, optional)
+   amxmodx/scripting/webhook_reporter.sma           -> (source, optional)
    amxmodx/scripting/compiled/webhook_reporter.amxx -> cstrike/addons/amxmodx/plugins/webhook_reporter.amxx
-   amxmodx/configs/webhook_reporter.cfg             -> cstrike/addons/amxmodx/configs/webhook_reporter.cfg
+   amxmodx/configs/webhook_reporter.cfg.example     -> cstrike/addons/amxmodx/configs/webhook_reporter.cfg
    ```
+   Rename the example config to `webhook_reporter.cfg` on the server. The live
+   config is gitignored because it holds your webhook URL.
    Add to `cstrike/addons/amxmodx/configs/plugins.ini`:
    ```
    webhook_reporter.amxx
@@ -81,11 +85,30 @@ No `@mentions`, no SteamID/IP/hostname broadcasting.
 | `amx_webhook_botname`    | `CS 1.6 Server` | Username shown in Discord messages                                       |
 | `amx_webhook_rate_limit` | `2.5`           | Seconds between requests once the 5-message burst is spent; `0` disables pacing. |
 
+The live `webhook_reporter.cfg` is gitignored - commit only
+`webhook_reporter.cfg.example`. If a webhook URL is ever exposed, delete that
+webhook in Discord and create a new one.
+
 All messages go through a small in-plugin rate-limited sender before being handed to `EzHttpQueue` and sent with `Content-Type: application/json`. Up to 5 messages are sent immediately; after that one request is sent every `amx_webhook_rate_limit` seconds (default `2.5` s ≈ 24/min), keeping chat bursts under Discord's per-webhook limit. Discord `429` responses are honoured via `retry_after` and retried up to 2 times. Each request uses a 5 s connect timeout and a 10 s total timeout. `amx_webhook_url` and `amx_webhook_botname` are read per request, so RCON changes take effect immediately. Requests cancelled by a map change (`EZH_REQUEST_CANCELLED`) are expected and are not logged as failures; unsent queued messages are dropped on map change (the `Map Ended` / shutdown message is sent immediately).
 
 `bForget` (`bool:bForget` in `Webhook_PostJson`, used by `Webhook_PostPlain`/`Webhook_SendEmbedRaw`) maps to `EzHttpPluginEndBehaviour` (`easy_http.inc`): `false` = `EZH_CANCEL_REQUEST` (default, callback receives `EZH_REQUEST_CANCELLED` on map change), `true` = `EZH_FORGET_REQUEST` (request completes after `ServerDeactivate` but callback is not invoked). The plugin passes `true` only in `plugin_end` so shutdown/map-ended webhooks are not lost.
 
 `log_amx` writes to `cstrike/addons/amxmodx/logs/L<YYYYMMDD>.log` (daily log) and mirrors to console. Check `addons/amxmodx/logs/` for `[Webhook] amx_webhook_url not set` or `[Webhook] POST failed err=...`.
+
+## Privacy / data sent
+
+The plugin is opt-in: nothing is sent until `amx_webhook_url` is set. Once it
+is configured, the following is forwarded to Discord:
+
+- player nicknames on connect, disconnect, and in chat
+- full `say` / `say_team` chat text
+- map names, round results, and match scores
+
+It does **not** send SteamIDs, IP addresses, or the server hostname. Names and
+chat are personal data in many jurisdictions, so server operators are
+responsible for informing players and complying with applicable law. Treat the
+webhook URL as a credential: if it leaks, delete the webhook in Discord and
+create a new one.
 
 ## Message Format
 
@@ -121,7 +144,7 @@ All messages go through a small in-plugin rate-limited sender before being hande
   Color: 0xE67E22
 
   Title: Halftime
-  Description: Halftime — teams keep their sides. Overtime begins. Score (A/D): 15/15
+  Description: Halftime - teams keep their sides. Overtime begins. Score (A/D): 15/15
   Color: 0xE67E22
 
   Title: Match Restarted
@@ -137,14 +160,16 @@ All messages go through a small in-plugin rate-limited sender before being hande
 
 ### GitHub Actions
 
-Push to `main`/`master` triggers `.github/workflows/build.yml`:
+Pushes to `main` and pull requests trigger `.github/workflows/build.yml`:
 
-- Installs AMX Mod X 1.10 compiler
-- Fetches `easy_http.inc` / `easy_http_json.inc` from `Next21Team/AmxxEasyHttp`
-- Compiles `amxmodx/scripting/webhook_reporter.sma` -> `amxmodx/scripting/compiled/webhook_reporter.amxx`
-- Uploads artifact `webhook_reporter.amxx`
+- Installs the AMX Mod X 1.10 compiler (archive checksum-verified)
+- Uses the vendored `easy_http.inc` / `easy_http_json.inc` from `amxmodx/scripting/include/`
+- Compiles `amxmodx/scripting/webhook_reporter.sma` -> `amxmodx/scripting/compiled/webhook_reporter.amxx` on Linux and Windows
+- Uploads the `webhook_reporter.amxx` artifact from the Linux job
 
-Download the artifact from the Actions tab.
+Download the artifact from the Actions tab, or push a `v*` tag to build and
+publish a GitHub Release containing `webhook_reporter.amxx`, `SHA256SUMS`, and
+a source archive.
 
 ### Local
 
@@ -167,15 +192,14 @@ amxmodx/
     compiled/
       webhook_reporter.amxx   # built artifact, gitignored
   configs/
-    webhook_reporter.cfg
-    webhook_reporter.cfg.example
+    webhook_reporter.cfg.example   # copy to webhook_reporter.cfg on the server
 ```
 
 No Gold Discord library, no extra dependencies other than AMXX Easy HTTP.
 
 ## Troubleshooting
 
-- **`amx_webhook_url not set — dropping`** in `cstrike/addons/amxmodx/logs/L<YYYYMMDD>.log` (also `error_*.log`, `amxx logs`) - `log_amx` always writes there - `amx_webhook_url` empty; check `webhook_reporter.cfg` and `amxx cvars`.
+- **`amx_webhook_url not set - dropping`** in `cstrike/addons/amxmodx/logs/L<YYYYMMDD>.log` (also `error_*.log`, `amxx logs`) - `log_amx` always writes there - `amx_webhook_url` empty; check `webhook_reporter.cfg` and `amxx cvars`.
 - **`easy_http` not running** -> module not in `modules.ini` or wrong binary (Linux vs Windows), check `amxx modules` and `meta list` if using Metamod.
 - **No Discord message** -> test webhook with `curl -H "Content-Type: application/json" -d '{"content":"test"}' https://discord.com/api/webhooks/...` ; check server can reach `discord.com:443` (firewall).
 - **HTTP error logged** (`[Webhook] POST failed err=... http=...` in same `L*.log`) -> see `EzHttpErrorCode` in `easy_http.inc` (`EZH_HOST_RESOLUTION_FAILURE`, `EZH_SSL_*`); check SSL deps on host.
@@ -199,3 +223,18 @@ No Gold Discord library, no extra dependencies other than AMXX Easy HTTP.
 ## Uninstall
 
 Remove `webhook_reporter.amxx` from `plugins.ini` and delete `webhook_reporter.cfg` / module if unused.
+
+## License
+
+Licensed under the [GNU General Public License v3.0 or later](LICENSE)
+(`GPL-3.0-or-later`).
+
+This plugin is a derivative work of [AMX Mod X](https://github.com/alliedmodders/amxmodx)
+and relies on AMX Mod X's plugin exception, which permits derivative works
+such as Pawn plugins to be licensed under GPL-2.0-or-later or
+GPL-3.0-or-later. The vendored `easy_http.inc` / `easy_http_json.inc` files
+are MIT-licensed; see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for
+details.
+
+Not affiliated with or endorsed by Valve, Discord, or the AMX Mod X
+Development Team.

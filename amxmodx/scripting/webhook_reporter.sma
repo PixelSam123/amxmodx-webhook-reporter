@@ -9,7 +9,7 @@
 #include <easy_http_json>
 
 #define PLUGIN "Discord Webhook Reporter"
-#define VERSION "1.2.0"
+#define VERSION "1.2.1"
 #define AUTHOR "PixelSam123"
 
 #define MAX_WEBHOOK_URL 512
@@ -255,7 +255,7 @@ public plugin_end()
 
     if (g_bChangingMap)
     {
-        // Map ended — embed
+        // Map ended - embed
         new szDesc[128];
         formatex(szDesc, charsmax(szDesc), "`%s`", szCurrentMap);
         Webhook_SendEmbedRaw("Map Ended", szDesc, 0x95A5A6, true);
@@ -440,7 +440,7 @@ stock StripColors(szMsg[], iLen)
 }
 
 // ---------------------------------------------------------------------------
-// Round end — TeamScore + SendAudio
+// Round end - TeamScore + SendAudio
 // ---------------------------------------------------------------------------
 
 public OnTeamScore(iMsgId, iDest, id)
@@ -522,7 +522,7 @@ public Task_SendRoundEmbed(iTaskId)
 }
 
 // ---------------------------------------------------------------------------
-// PugMod match state (SmileYzn/PugMod) — pug_state polling + cumulative score
+// PugMod match state (SmileYzn/PugMod) - pug_state polling + cumulative score
 // ---------------------------------------------------------------------------
 
 // Detect PugMod through its cvars and enable the appropriate mode:
@@ -791,7 +791,7 @@ public Task_Halftime(iTaskId)
     {
         formatex(
             szDesc, charsmax(szDesc),
-            "Halftime — teams keep their sides. Overtime begins. Score (A/D): %d/%d",
+            "Halftime - teams keep their sides. Overtime begins. Score (A/D): %d/%d",
             g_iHalftimeScoreT, g_iHalftimeScoreD
         );
     }
@@ -840,7 +840,7 @@ stock Webhook_SendRoundEmbed(bool:bTWin, bool:bDraw)
 }
 
 // ---------------------------------------------------------------------------
-// Webhook helpers — plain vs embed
+// Webhook helpers - plain vs embed
 // ---------------------------------------------------------------------------
 
 stock Webhook_SendPlain(const szFmt[], any:...)
@@ -996,7 +996,7 @@ stock Webhook_PostJson(EzJSON:obj, bool:bForget)
     if (!Webhook_GetUrl(szUrl, charsmax(szUrl)))
     {
         ezjson_free(obj);
-        log_amx("[Webhook] amx_webhook_url not set — dropping");
+        log_amx("[Webhook] amx_webhook_url not set - dropping");
         return;
     }
 
