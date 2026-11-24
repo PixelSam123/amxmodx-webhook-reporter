@@ -3,6 +3,7 @@
 // This file is executed automatically on plugin_cfg (and you can exec it manually).
 
 // Single Discord webhook URL for all events. Keep it private!
+// Never commit the real webhook_reporter.cfg - it is gitignored on purpose.
 // Example: https://discord.com/api/webhooks/1234567890/AbcDefGhIjKlMnOpQrStUvWxYz
 amx_webhook_url ""
 

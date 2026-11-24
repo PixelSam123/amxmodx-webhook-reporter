@@ -3,3 +3,12 @@ amxmodx/scripting/compiled/*.amxx
 *.amxx
 .DS_Store
 Thumbs.db
+
+# Live config: contains the Discord webhook URL (a secret).
+# Commit webhook_reporter.cfg.example instead.
+amxmodx/configs/webhook_reporter.cfg
+
+# Editor and log files
+.vscode/
+.idea/
+*.log
