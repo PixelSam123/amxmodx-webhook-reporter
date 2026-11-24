@@ -19,7 +19,7 @@ No `@mentions`, no SteamID/IP/hostname broadcasting.
 ## Requirements
 
 - AMX Mod X 1.9+ recommended (1.8.3 partially supported - 32-char native limit)
-- `AmxxEasyHttp` 1.4.0+ module (`easy_http_amxx_i386.so` / `easy_http_amxx.dll`)
+- `AmxxEasyHttp` 1.5.0+ module (`easy_http_amxx_i386.so` / `easy_http_amxx.dll`)
 - Discord webhook URL
 
 ## Installation
@@ -75,12 +75,13 @@ No `@mentions`, no SteamID/IP/hostname broadcasting.
 
 ## Configuration
 
-| CVar                  | Default         | Description                                                              |
-|-----------------------|-----------------|--------------------------------------------------------------------------|
-| `amx_webhook_url`     | `""`            | **Required.** Single Discord webhook URL. Keep private (protected flag). |
-| `amx_webhook_botname` | `CS 1.6 Server` | Username shown in Discord messages                                       |
+| CVar                     | Default         | Description                                                              |
+|--------------------------|-----------------|--------------------------------------------------------------------------|
+| `amx_webhook_url`        | `""`            | **Required.** Single Discord webhook URL. Keep private (protected flag). |
+| `amx_webhook_botname`    | `CS 1.6 Server` | Username shown in Discord messages                                       |
+| `amx_webhook_rate_limit` | `2.5`           | Seconds between requests once the 5-message burst is spent; `0` disables pacing. |
 
-All messages are queued via `EzHttpQueue` and sent with `Content-Type: application/json`. Each request uses a 5 s connect timeout and a 10 s total timeout, so a stalled connection cannot block the shared queue. `amx_webhook_url` and `amx_webhook_botname` are read per request, so RCON changes take effect immediately. Requests cancelled by a map change (`EZH_REQUEST_CANCELLED`) are expected and are not logged as failures.
+All messages go through a small in-plugin rate-limited sender before being handed to `EzHttpQueue` and sent with `Content-Type: application/json`. Up to 5 messages are sent immediately; after that one request is sent every `amx_webhook_rate_limit` seconds (default `2.5` s ≈ 24/min), keeping chat bursts under Discord's per-webhook limit. Discord `429` responses are honoured via `retry_after` and retried up to 2 times. Each request uses a 5 s connect timeout and a 10 s total timeout. `amx_webhook_url` and `amx_webhook_botname` are read per request, so RCON changes take effect immediately. Requests cancelled by a map change (`EZH_REQUEST_CANCELLED`) are expected and are not logged as failures; unsent queued messages are dropped on map change (the `Map Ended` / shutdown message is sent immediately).
 
 `bForget` (`bool:bForget` in `Webhook_PostJson`, used by `Webhook_PostPlain`/`Webhook_SendEmbedRaw`) maps to `EzHttpPluginEndBehaviour` (`easy_http.inc`): `false` = `EZH_CANCEL_REQUEST` (default, callback receives `EZH_REQUEST_CANCELLED` on map change), `true` = `EZH_FORGET_REQUEST` (request completes after `ServerDeactivate` but callback is not invoked). The plugin passes `true` only in `plugin_end` so shutdown/map-ended webhooks are not lost.
 
@@ -178,7 +179,7 @@ No Gold Discord library, no extra dependencies other than AMXX Easy HTTP.
 - **`easy_http` not running** -> module not in `modules.ini` or wrong binary (Linux vs Windows), check `amxx modules` and `meta list` if using Metamod.
 - **No Discord message** -> test webhook with `curl -H "Content-Type: application/json" -d '{"content":"test"}' https://discord.com/api/webhooks/...` ; check server can reach `discord.com:443` (firewall).
 - **HTTP error logged** (`[Webhook] POST failed err=... http=...` in same `L*.log`) -> see `EzHttpErrorCode` in `easy_http.inc` (`EZH_HOST_RESOLUTION_FAILURE`, `EZH_SSL_*`); check SSL deps on host.
-- **Map Ended not firing** -> `plugin_end` uses `bForget=true` -> `EZH_FORGET_REQUEST`; if you see `EZH_REQUEST_CANCELLED`, update EasyHttp to 1.4.0+.
+- **Map Ended not firing** -> `plugin_end` uses `bForget=true` -> `EZH_FORGET_REQUEST`; if you see `EZH_REQUEST_CANCELLED`, update EasyHttp to 1.5.0+.
 - **Bots still logged** -> ensure `is_user_bot`/`is_user_hltv` checks; PODBot etc. are correctly flagged.
 - **Player chat appears twice in-game** -> older builds hooked `SayText` for PugMod detection, which made AMXX intercept and re-emit every game chat line. Current builds read `pug_state` instead and never hook `SayText`; make sure the current `webhook_reporter.amxx` is installed and that no other chat/prefix plugin is reprinting `say` messages.
 
@@ -191,6 +192,7 @@ No Gold Discord library, no extra dependencies other than AMXX Easy HTTP.
 - PugMod restart/cancel: a transition to First Half while a match is in progress emits `Match Restarted`; a transition to Deathmatch / Dead while a match is in progress emits `Match Cancelled`. Finished (`10`) marks the match as ended and suppresses the post-match Deathmatch / Vote Map transitions, so a normal match end is not reported as a restart or cancel. Scores, halftime counters and pending `TASK_ROUND`/`TASK_HALFTIME` embeds are dropped immediately on restart/cancel.
 - PugMod fallback (older PugMod without `pug_state`, or another halftime system with the same cvars): halftime is inferred after `pug_rounds / 2` round wins per regulation half and `pug_rounds_ot / 2` per overtime half (halftime #3+ = OT). Limitations: it assumes a swap at every halftime, counts knife-round wins (so the knife-round feature can shift it by one round), and cannot detect restart/cancel at all.
 - All PugMod/halftime state resets in `plugin_cfg` (`Task_ReadCvarsAndHandle`), including mid-map plugin loads; `Pug_ReadConfig` reads `pug_state` / `pug_rounds` / `pug_rounds_ot` via `get_cvar_pointer` each map and (re)starts the poll task.
+- Outbound queue: `Webhook_Enqueue` stores serialized bodies in an `Array` of `DataPack`s; `Task_SendQueue` sends one at a time with a token bucket (`RATE_CAPACITY` = 5 burst, refill = `1 / amx_webhook_rate_limit`). On `429` the body is re-inserted at the head and retried up to `MAX_RETRIES`; `retry_after` is read from the JSON body (or the `Retry-After` header). `plugin_end` sends `Map Ended`/shutdown directly with `EZH_FORGET_REQUEST` and drops queued messages.
 - Map vs shutdown: `g_bChangingMap` set by `server_changelevel()` and `changelevel`/`map`/`amx_map` command hooks; `plugin_end` sends `Map Ended` embed if true else `Server shutting down` plain.
 - Hungarian notation: `g_i*`, `g_sz*`, `g_b*`, `g_p*`, `g_Queue`.
 

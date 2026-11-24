@@ -8,3 +8,7 @@ amx_webhook_url ""
 
 // Bot username shown in Discord (embeds and plain messages). Default: "CS 1.6 Server"
 amx_webhook_botname "CS 1.6 Server"
+
+// Seconds between webhook requests once the 5-message burst is spent.
+// 0 disables pacing. Discord's webhook limit is about 30 requests/minute.
+amx_webhook_rate_limit "2.5"

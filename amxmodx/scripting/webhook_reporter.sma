@@ -19,7 +19,17 @@
 #define TASK_ROUND        9877
 #define TASK_HALFTIME     9878
 #define TASK_PUG_POLL     9879
+#define TASK_SEND_QUEUE   9880
 #define TASK_CONNECT_BASE 5000
+
+// Outbound rate limiting. Discord's webhook route is roughly 30 requests per
+// minute; allow a small burst, then pace the rest. amx_webhook_rate_limit is
+// the seconds between requests once the burst is spent (0 disables pacing).
+#define SEND_QUEUE_TICK   0.1
+#define RATE_CAPACITY     5.0
+#define MAX_PENDING       100
+#define MAX_RETRIES       2
+#define MAX_BODY_LEN      1536
 
 #define COLOR_HALFTIME    0xE67E22
 #define COLOR_RESTART     0xF1C40F
@@ -40,6 +50,7 @@
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
+new g_pCvarRateLimit;
 
 new g_szPrevMap[64];
 new bool:g_bFirstCfg = true;
@@ -51,6 +62,18 @@ new bool:g_bPendingTWin;
 new bool:g_bPendingDraw;
 
 new EzHttpQueue:g_Queue;
+
+// Outbound sender: one request in flight, burst bucket + 429 backoff.
+new Array:g_Pending;
+new bool:g_bSenderReady;
+new bool:g_bSending;
+new bool:g_bQueueFullLogged;
+new Float:g_flTokens = RATE_CAPACITY;
+new Float:g_flTokenTime;
+new Float:g_flNextSend;
+new EzHttpRequest:g_CurrentRequest;
+new g_szCurrentBody[MAX_BODY_LEN];
+new g_iCurrentRetries;
 
 new g_iMsgTeamScore;
 
@@ -91,8 +114,10 @@ public plugin_init()
 
     g_pCvarWebhookUrl = register_cvar("amx_webhook_url", "", FCVAR_PROTECTED);
     g_pCvarBotName    = register_cvar("amx_webhook_botname", "CS 1.6 Server");
+    g_pCvarRateLimit  = register_cvar("amx_webhook_rate_limit", "2.5");
 
     g_Queue = ezhttp_create_queue();
+    Webhook_EnsureSender();
     g_iMsgTeamScore = get_user_msgid("TeamScore");
 
     register_clcmd("say", "OnChat");
@@ -134,6 +159,9 @@ public Task_ReadCvarsAndHandle(iTaskId)
 {
     // iTaskId == TASK_CFG, unused except to satisfy set_task callback signature.
     #pragma unused iTaskId
+
+    // (Re)start the outbound sender after a map change / reload.
+    Webhook_EnsureSender();
 
     new szNextMap[64];
     get_mapname(szNextMap, charsmax(szNextMap));
@@ -201,6 +229,21 @@ public plugin_end()
 {
     // plugin_end is called on map change AND on server shutdown/unload.
     // g_bChangingMap distinguishes the two (best-effort; covers changelevel/map/amx_map and engine_changelevel)
+
+    // Queued messages belong to the map being left behind; the Map Ended /
+    // shutdown message below is sent immediately, outside the queue.
+    Webhook_ClearQueue();
+    g_bSending = false;
+    g_CurrentRequest = EzHttpRequest:0;
+
+    if (!g_bChangingMap && g_bSenderReady)
+    {
+        // Actual unload/shutdown: release the queue and stop the worker.
+        remove_task(TASK_SEND_QUEUE);
+        ArrayDestroy(g_Pending);
+        g_bSenderReady = false;
+    }
+
     new szUrl[MAX_WEBHOOK_URL];
     if (!Webhook_GetUrl(szUrl, charsmax(szUrl))) return;
 
@@ -825,12 +868,125 @@ stock Webhook_SetBotName(EzJSON:obj)
     }
 }
 
-// Serializes and posts obj through the shared queue, then frees obj.
+// Creates the outbound queue and (re)starts the sender task. Idempotent; safe
+// to call on every map.
+stock Webhook_EnsureSender()
+{
+    if (!g_bSenderReady)
+    {
+        g_Pending = ArrayCreate(1, 32);
+        g_bSenderReady = true;
+    }
+
+    g_bSending = false;
+    g_CurrentRequest = EzHttpRequest:0;
+    g_flTokens = RATE_CAPACITY;
+    g_flTokenTime = get_gametime();
+    g_flNextSend = 0.0;
+
+    remove_task(TASK_SEND_QUEUE);
+    set_task(SEND_QUEUE_TICK, "Task_SendQueue", TASK_SEND_QUEUE, _, _, "b");
+}
+
+// Drops every queued message (map change / unload).
+stock Webhook_ClearQueue()
+{
+    if (!g_bSenderReady) return;
+
+    new iDropped = ArraySize(g_Pending);
+    while (ArraySize(g_Pending) > 0)
+    {
+        new DataPack:pack = ArrayGetCell(g_Pending, 0);
+        ArrayDeleteItem(g_Pending, 0);
+        DestroyDataPack(pack);
+    }
+
+    g_bQueueFullLogged = false;
+
+    if (iDropped > 0)
+    {
+        log_amx("[Webhook] dropped %d queued message(s)", iDropped);
+    }
+}
+
+// Appends a serialized request to the send queue.
+stock Webhook_Enqueue(const szBody[])
+{
+    if (!g_bSenderReady)
+    {
+        Webhook_EnsureSender();
+    }
+
+    if (ArraySize(g_Pending) >= MAX_PENDING)
+    {
+        // Keep the most recent events: drop the oldest queued message.
+        new DataPack:old = ArrayGetCell(g_Pending, 0);
+        ArrayDeleteItem(g_Pending, 0);
+        DestroyDataPack(old);
+
+        if (!g_bQueueFullLogged)
+        {
+            log_amx("[Webhook] send queue full (%d), dropping oldest messages", MAX_PENDING);
+            g_bQueueFullLogged = true;
+        }
+    }
+
+    new DataPack:pack = CreateDataPack();
+    WritePackCell(pack, 0); // retry count
+    WritePackString(pack, szBody);
+    ArrayPushCell(g_Pending, pack);
+}
+
+// Re-inserts a rate-limited request at the head of the queue.
+stock Webhook_Requeue(const szBody[], iRetries)
+{
+    if (ArraySize(g_Pending) >= MAX_PENDING)
+    {
+        // The queue refilled while the request was in flight; make room.
+        new DataPack:old = ArrayGetCell(g_Pending, 0);
+        ArrayDeleteItem(g_Pending, 0);
+        DestroyDataPack(old);
+    }
+
+    new DataPack:pack = CreateDataPack();
+    WritePackCell(pack, iRetries);
+    WritePackString(pack, szBody);
+
+    if (ArraySize(g_Pending) > 0)
+    {
+        ArrayInsertCellBefore(g_Pending, 0, pack);
+    }
+    else
+    {
+        ArrayPushCell(g_Pending, pack);
+    }
+}
+
+// Posts one serialized body through the shared EasyHttp queue.
 // bForget: false = EZH_CANCEL_REQUEST (callback gets EZH_REQUEST_CANCELLED on
 //                    map change),
 //          true  = EZH_FORGET_REQUEST (completes after ServerDeactivate, no
 //                    callback). Only plugin_end passes true so shutdown /
 //                    Map Ended webhooks are not lost.
+stock EzHttpRequest:Webhook_SendBody(const szBody[], const szUrl[], bool:bForget)
+{
+    new EzHttpOptions:opts = ezhttp_create_options();
+    ezhttp_option_set_header(opts, "Content-Type", "application/json");
+    ezhttp_option_set_body(opts, szBody);
+    ezhttp_option_set_queue(opts, g_Queue);
+    ezhttp_option_set_connect_timeout(opts, 5000);
+    ezhttp_option_set_timeout(opts, 10000);
+    if (bForget)
+    {
+        ezhttp_option_set_plugin_end_behaviour(opts, EZH_FORGET_REQUEST);
+    }
+
+    // opts variable auto-destroys itself
+    return ezhttp_post(szUrl, "OnHttpComplete", opts);
+}
+
+// Serializes obj, then sends it immediately (plugin_end fire-and-forget) or
+// queues it for the rate-limited sender.
 stock Webhook_PostJson(EzJSON:obj, bool:bForget)
 {
     new szUrl[MAX_WEBHOOK_URL];
@@ -841,22 +997,88 @@ stock Webhook_PostJson(EzJSON:obj, bool:bForget)
         return;
     }
 
-    new EzHttpOptions:opts = ezhttp_create_options();
-    ezhttp_option_set_header(opts, "Content-Type", "application/json");
-    ezhttp_option_set_body_from_json(opts, obj, false);
-    ezjson_free(obj);
-
-    ezhttp_option_set_queue(opts, g_Queue);
-    ezhttp_option_set_connect_timeout(opts, 5000);
-    ezhttp_option_set_timeout(opts, 10000);
-    if (bForget)
+    new iSize = ezjson_serial_size(obj);
+    if (iSize >= MAX_BODY_LEN)
     {
-        ezhttp_option_set_plugin_end_behaviour(opts, EZH_FORGET_REQUEST);
+        ezjson_free(obj);
+        log_amx("[Webhook] message too large (%d bytes), dropping", iSize);
+        return;
     }
 
-    ezhttp_post(szUrl, "OnHttpComplete", opts);
+    new szBody[MAX_BODY_LEN];
+    ezjson_serial_to_string(obj, szBody, charsmax(szBody));
+    ezjson_free(obj);
 
-    // opts variable auto-destroys itself
+    if (bForget)
+    {
+        Webhook_SendBody(szBody, szUrl, true);
+    }
+    else
+    {
+        Webhook_Enqueue(szBody);
+    }
+}
+
+// Sends at most one queued request at a time. Token bucket: RATE_CAPACITY
+// immediate messages, then one every amx_webhook_rate_limit seconds.
+public Task_SendQueue(iTaskId)
+{
+    #pragma unused iTaskId
+
+    if (g_bSending || !g_bSenderReady || ArraySize(g_Pending) == 0)
+    {
+        return;
+    }
+
+    new Float:fNow = get_gametime();
+    if (fNow < g_flNextSend)
+    {
+        return;
+    }
+
+    new Float:fInterval = get_pcvar_float(g_pCvarRateLimit);
+    if (fInterval > 0.0)
+    {
+        g_flTokens = floatmin(RATE_CAPACITY, g_flTokens + (fNow - g_flTokenTime) / fInterval);
+        g_flTokenTime = fNow;
+
+        if (g_flTokens < 1.0)
+        {
+            return;
+        }
+    }
+
+    new szUrl[MAX_WEBHOOK_URL];
+    if (!Webhook_GetUrl(szUrl, charsmax(szUrl)))
+    {
+        return; // keep queued until a webhook URL is configured
+    }
+
+    new DataPack:pack = ArrayGetCell(g_Pending, 0);
+    ArrayDeleteItem(g_Pending, 0);
+    ResetPack(pack);
+    g_iCurrentRetries = ReadPackCell(pack);
+    ReadPackString(pack, g_szCurrentBody, charsmax(g_szCurrentBody));
+    DestroyDataPack(pack);
+
+    if (ArraySize(g_Pending) < MAX_PENDING)
+    {
+        g_bQueueFullLogged = false;
+    }
+
+    if (fInterval > 0.0)
+    {
+        g_flTokens -= 1.0;
+    }
+
+    g_bSending = true;
+    g_CurrentRequest = Webhook_SendBody(g_szCurrentBody, szUrl, false);
+
+    if (g_CurrentRequest == EzHttpRequest:0)
+    {
+        g_bSending = false;
+        log_amx("[Webhook] failed to submit request");
+    }
 }
 
 // Plain content POST
@@ -915,6 +1137,16 @@ stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget
 
 public OnHttpComplete(EzHttpRequest:request_id)
 {
+    // Only the single queued request we submitted is ours. Late callbacks from
+    // an older map or a fire-and-forget request are ignored.
+    if (!g_bSending || request_id != g_CurrentRequest)
+    {
+        return;
+    }
+
+    g_bSending = false;
+    g_CurrentRequest = EzHttpRequest:0;
+
     new EzHttpErrorCode:iErr = ezhttp_get_error_code(request_id);
 
     // Map change / plugin unload cancels queued requests (EZH_CANCEL_REQUEST);
@@ -924,11 +1156,52 @@ public OnHttpComplete(EzHttpRequest:request_id)
         return;
     }
 
+    new iHttp = ezhttp_get_http_code(request_id);
+
+    if (iHttp == 429)
+    {
+        // Honour Discord's advertised delay (JSON float seconds; header as a
+        // fallback) and retry a bounded number of times.
+        new Float:fDelay = 5.0;
+
+        new EzJSON:resp = ezhttp_parse_json_response(request_id);
+        if (resp != EzInvalid_JSON)
+        {
+            fDelay = ezjson_object_get_real(resp, "retry_after");
+            ezjson_free(resp);
+        }
+        else
+        {
+            new szRetry[16];
+            if (ezhttp_get_headers(request_id, "Retry-After", szRetry, charsmax(szRetry)))
+            {
+                fDelay = str_to_float(szRetry);
+            }
+        }
+
+        if (fDelay < 1.0) fDelay = 1.0;
+        if (fDelay > 60.0) fDelay = 60.0;
+
+        // Discord's bucket has reset; allow the retry after the delay.
+        g_flNextSend = get_gametime() + fDelay;
+        g_flTokens = RATE_CAPACITY;
+        g_flTokenTime = g_flNextSend;
+
+        if (g_iCurrentRetries < MAX_RETRIES)
+        {
+            Webhook_Requeue(g_szCurrentBody, g_iCurrentRetries + 1);
+        }
+        else
+        {
+            log_amx("[Webhook] rate limited; dropping after %d retries", MAX_RETRIES);
+        }
+        return;
+    }
+
     if (iErr != EZH_OK)
     {
         new szErr[128];
         ezhttp_get_error_message(request_id, szErr, charsmax(szErr));
-        new iHttp = ezhttp_get_http_code(request_id);
         log_amx("[Webhook] POST failed err=%d http=%d msg=%s", iErr, iHttp, szErr);
     }
 }
