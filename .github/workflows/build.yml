@@ -2,55 +2,59 @@ name: Build AMXX Plugin
 
 env:
   PLUGIN_NAME: webhook_reporter
+  AMXX_VERSION: 1.10.0-git5481
+  AMXX_LINUX_SHA256: ee33b31ae92afd94802c43eae14ecdfa1ffa2ba0b11658e8bec98f48a5881272
+  AMXX_WINDOWS_SHA256: 5ece16f1c0060de0591cdc7ea3643c71598b3754938c7d39e3b7923dafbc57af
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build_linux:
     name: Build (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install AMX Mod X compiler 1.10 (Linux)
         run: |
-          wget -q https://github.com/alliedmodders/amxmodx/releases/download/1.10.0.5481/amxmodx-1.10.0-git5481-base-linux.tar.gz -O amxmodx.tar.gz
+          wget -q "https://github.com/alliedmodders/amxmodx/releases/download/${AMXX_VERSION}/amxmodx-${AMXX_VERSION}-base-linux.tar.gz" -O amxmodx.tar.gz
+          echo "${AMXX_LINUX_SHA256}  amxmodx.tar.gz" | sha256sum -c -
           mkdir -p amxmodx_linux
           tar -xzf amxmodx.tar.gz -C amxmodx_linux
-          ls -lh amxmodx_linux/addons/amxmodx/scripting/amxxpc*
           AMXXPC=$(find amxmodx_linux -name "amxxpc" -type f | head -n1)
           AMXXPC_DIR=$(dirname "$AMXXPC")
-          echo "AMXXPC=$AMXXPC" >> $GITHUB_ENV
-          echo "AMXXPC_DIR=$AMXXPC_DIR" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=$AMXXPC_DIR:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-          ls -la "$AMXXPC" "$AMXXPC_DIR/amxxpc32.so"
+          echo "AMXXPC=$AMXXPC" >> "$GITHUB_ENV"
+          echo "AMXXPC_DIR=$AMXXPC_DIR" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$AMXXPC_DIR:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           chmod +x "$AMXXPC"
-
-      - name: Install AmxxEasyHttp includes
-        run: |
-          mkdir -p amxmodx/scripting/include
-          wget -q -O amxmodx/scripting/include/easy_http.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http.inc
-          wget -q -O amxmodx/scripting/include/easy_http_json.inc https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http_json.inc
-          ls -la amxmodx/scripting/include/easy_http*
 
       - name: Compile ${{ env.PLUGIN_NAME }}.sma
         run: |
           mkdir -p amxmodx/scripting/compiled
-          echo "Using compiler: $AMXXPC (dir $AMXXPC_DIR)"
-          ls -la "$AMXXPC_DIR/amxxpc"*
-          ls -la amxmodx/scripting/
-          LD_LIBRARY_PATH="$AMXXPC_DIR:$LD_LIBRARY_PATH" "$AMXXPC" amxmodx/scripting/${{ env.PLUGIN_NAME }}.sma -oamxmodx/scripting/compiled/${{ env.PLUGIN_NAME }}.amxx -iamxmodx/scripting/include -iamxmodx_linux/addons/amxmodx/scripting/include
-          ls -lh amxmodx/scripting/compiled/
-          test -f amxmodx/scripting/compiled/${{ env.PLUGIN_NAME }}.amxx || { echo "Compile failed - artifact missing" >&2; exit 1; }
+          # EasyHttp includes are vendored in amxmodx/scripting/include.
+          LD_LIBRARY_PATH="$AMXXPC_DIR:${LD_LIBRARY_PATH}" \
+            "$AMXXPC" "amxmodx/scripting/${PLUGIN_NAME}.sma" \
+            "-oamxmodx/scripting/compiled/${PLUGIN_NAME}.amxx" \
+            "-iamxmodx/scripting/include" \
+            "-iamxmodx_linux/addons/amxmodx/scripting/include"
+          test -f "amxmodx/scripting/compiled/${PLUGIN_NAME}.amxx" || { echo "Compile failed - artifact missing" >&2; exit 1; }
 
-      - name: Upload artifact (Linux)
-        uses: actions/upload-artifact@v4
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ env.PLUGIN_NAME }}-linux.amxx
+          name: ${{ env.PLUGIN_NAME }}.amxx
           path: amxmodx/scripting/compiled/${{ env.PLUGIN_NAME }}.amxx
           if-no-files-found: error
 
@@ -58,42 +62,66 @@ jobs:
     name: Build (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install AMX Mod X compiler 1.10 (Windows)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri https://github.com/alliedmodders/amxmodx/releases/download/1.10.0.5481/amxmodx-1.10.0-git5481-base-windows.zip -OutFile amxmodx.zip
+          Invoke-WebRequest -Uri "https://github.com/alliedmodders/amxmodx/releases/download/$env:AMXX_VERSION/amxmodx-$env:AMXX_VERSION-base-windows.zip" -OutFile amxmodx.zip
+          $hash = (Get-FileHash amxmodx.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:AMXX_WINDOWS_SHA256) { throw "AMX Mod X archive checksum mismatch: $hash" }
           Expand-Archive amxmodx.zip -DestinationPath amxmodx_win -Force
-          Get-ChildItem -Recurse -Filter "amxxpc*" -Path amxmodx_win | Format-Table FullName,Length
           $AMXXPC = Get-ChildItem -Recurse -Filter "amxxpc.exe" -Path amxmodx_win | Select-Object -First 1 -ExpandProperty FullName
-          $AMXXPC_DIR = Split-Path $AMXXPC
+          if (-not $AMXXPC) { throw "amxxpc.exe not found in the AMX Mod X archive" }
           "AMXXPC=$AMXXPC" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "AMXXPC_DIR=$AMXXPC_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Get-ChildItem $AMXXPC_DIR/amxxpc* | Format-List Name,Length,FullName
-
-      - name: Install AmxxEasyHttp includes
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path amxmodx/scripting/include -Force | Out-Null
-          Invoke-WebRequest -Uri https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http.inc -OutFile amxmodx/scripting/include/easy_http.inc
-          Invoke-WebRequest -Uri https://raw.githubusercontent.com/Next21Team/AmxxEasyHttp/main/amxx/scripting/include/easy_http_json.inc -OutFile amxmodx/scripting/include/easy_http_json.inc
-          Get-ChildItem amxmodx/scripting/include/easy_http* | Format-List Name,Length
+          "AMXXPC_DIR=$(Split-Path $AMXXPC)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Compile ${{ env.PLUGIN_NAME }}.sma
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path amxmodx/scripting/compiled -Force | Out-Null
-          Write-Host "Using compiler: $env:AMXXPC (dir $env:AMXXPC_DIR)"
-          Get-ChildItem "$env:AMXXPC_DIR/amxxpc*" | Format-Table Name,Length
-          Get-ChildItem amxmodx/scripting/ | Format-Table Name,Length
-          & $env:AMXXPC "amxmodx\scripting\${{ env.PLUGIN_NAME }}.sma" "-oamxmodx\scripting\compiled\${{ env.PLUGIN_NAME }}.amxx" "-iamxmodx\scripting\include" "-iamxmodx_win\addons\amxmodx\scripting\include"
-          Get-ChildItem amxmodx/scripting/compiled/ | Format-Table Name,Length
-          if (-not (Test-Path amxmodx/scripting/compiled/${{ env.PLUGIN_NAME }}.amxx)) { throw "Compile failed - artifact missing" }
+          # EasyHttp includes are vendored in amxmodx/scripting/include.
+          & $env:AMXXPC "amxmodx\scripting\$env:PLUGIN_NAME.sma" "-oamxmodx\scripting\compiled\$env:PLUGIN_NAME.amxx" "-iamxmodx\scripting\include" "-iamxmodx_win\addons\amxmodx\scripting\include"
+          if (-not (Test-Path "amxmodx/scripting/compiled/$env:PLUGIN_NAME.amxx")) { throw "Compile failed - artifact missing" }
 
-      - name: Upload artifact (Windows)
-        uses: actions/upload-artifact@v4
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [build_linux, build_windows]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download compiled plugin
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ env.PLUGIN_NAME }}-windows.amxx
-          path: amxmodx/scripting/compiled/${{ env.PLUGIN_NAME }}.amxx
-          if-no-files-found: error
+          name: ${{ env.PLUGIN_NAME }}.amxx
+          path: dist
+
+      - name: Prepare release files
+        run: |
+          PLUGIN_FILE=$(find dist -name "${PLUGIN_NAME}.amxx" -print -quit)
+          test -n "$PLUGIN_FILE" || { echo "compiled plugin not found" >&2; exit 1; }
+          cp "$PLUGIN_FILE" "${PLUGIN_NAME}.amxx"
+          sha256sum "${PLUGIN_NAME}.amxx" > SHA256SUMS
+          git archive --format=zip --prefix="${PLUGIN_NAME}-${GITHUB_REF_NAME}/" -o "${PLUGIN_NAME}-${GITHUB_REF_NAME}-source.zip" HEAD
+          sha256sum "${PLUGIN_NAME}-${GITHUB_REF_NAME}-source.zip" >> SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSETS=(
+            "${PLUGIN_NAME}.amxx"
+            "SHA256SUMS"
+            "${PLUGIN_NAME}-${GITHUB_REF_NAME}-source.zip"
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
