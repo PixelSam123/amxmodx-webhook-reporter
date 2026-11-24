@@ -2,7 +2,8 @@ name: Build AMXX Plugin
 
 env:
   PLUGIN_NAME: webhook_reporter
-  AMXX_VERSION: 1.10.0-git5481
+  AMXX_RELEASE_TAG: 1.10.0.5481       # GitHub release tag
+  AMXX_ASSET_VERSION: 1.10.0-git5481  # version used in asset filenames
   AMXX_LINUX_SHA256: ee33b31ae92afd94802c43eae14ecdfa1ffa2ba0b11658e8bec98f48a5881272
   AMXX_WINDOWS_SHA256: 5ece16f1c0060de0591cdc7ea3643c71598b3754938c7d39e3b7923dafbc57af
 
@@ -29,7 +30,7 @@ jobs:
 
       - name: Install AMX Mod X compiler 1.10 (Linux)
         run: |
-          wget -q "https://github.com/alliedmodders/amxmodx/releases/download/${AMXX_VERSION}/amxmodx-${AMXX_VERSION}-base-linux.tar.gz" -O amxmodx.tar.gz
+          wget -q "https://github.com/alliedmodders/amxmodx/releases/download/${{ env.AMXX_RELEASE_TAG }}/amxmodx-${{ env.AMXX_ASSET_VERSION }}-base-linux.tar.gz" -O amxmodx.tar.gz
           echo "${AMXX_LINUX_SHA256}  amxmodx.tar.gz" | sha256sum -c -
           mkdir -p amxmodx_linux
           tar -xzf amxmodx.tar.gz -C amxmodx_linux
@@ -67,7 +68,7 @@ jobs:
       - name: Install AMX Mod X compiler 1.10 (Windows)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/alliedmodders/amxmodx/releases/download/$env:AMXX_VERSION/amxmodx-$env:AMXX_VERSION-base-windows.zip" -OutFile amxmodx.zip
+          Invoke-WebRequest -Uri "https://github.com/alliedmodders/amxmodx/releases/download/${{ env.AMXX_RELEASE_TAG }}/amxmodx-${{ env.AMXX_ASSET_VERSION }}-base-windows.zip" -OutFile amxmodx.zip
           $hash = (Get-FileHash amxmodx.zip -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne $env:AMXX_WINDOWS_SHA256) { throw "AMX Mod X archive checksum mismatch: $hash" }
           Expand-Archive amxmodx.zip -DestinationPath amxmodx_win -Force
