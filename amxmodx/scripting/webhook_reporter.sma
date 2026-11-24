@@ -40,11 +40,8 @@
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
-new g_szWebhookUrl[MAX_WEBHOOK_URL];
-new g_szBotName[64];
 
 new g_szPrevMap[64];
-new g_szNextMap[64];
 new bool:g_bFirstCfg = true;
 new bool:g_bChangingMap = false;
 
@@ -55,7 +52,6 @@ new bool:g_bPendingDraw;
 
 new EzHttpQueue:g_Queue;
 
-new g_szPlayerName[MAX_PLAYERS + 1][32];
 new g_iMsgTeamScore;
 
 // PugMod (SmileYzn/PugMod) match-state tracking.
@@ -107,7 +103,10 @@ public plugin_init()
     register_event("SendAudio", "OnRoundDraw", "a", "2&%!MRAD_rounddraw");
 
     // TeamScore updates after each round; also used for generic score tracking
-    register_message(g_iMsgTeamScore, "OnTeamScore");
+    if (g_iMsgTeamScore > 0)
+    {
+        register_message(g_iMsgTeamScore, "OnTeamScore");
+    }
 
     // Hooks for map change detection (server_changelevel forward is only engine pfnChangeLevel)
     register_concmd("changelevel", "OnMapCmd");
@@ -135,25 +134,23 @@ public Task_ReadCvarsAndHandle(iTaskId)
 {
     // iTaskId == TASK_CFG, unused except to satisfy set_task callback signature.
     #pragma unused iTaskId
-    get_pcvar_string(g_pCvarWebhookUrl, g_szWebhookUrl, charsmax(g_szWebhookUrl));
-    get_pcvar_string(g_pCvarBotName, g_szBotName, charsmax(g_szBotName));
-    trim(g_szWebhookUrl);
 
-    get_mapname(g_szNextMap, charsmax(g_szNextMap));
+    new szNextMap[64];
+    get_mapname(szNextMap, charsmax(szNextMap));
 
     if (g_bFirstCfg)
     {
         g_bFirstCfg = false;
-        copy(g_szPrevMap, charsmax(g_szPrevMap), g_szNextMap);
-        Webhook_SendPlain("Server started on map `%s`", g_szNextMap);
+        copy(g_szPrevMap, charsmax(g_szPrevMap), szNextMap);
+        Webhook_SendPlain("Server started on map `%s`", szNextMap);
     }
     else
     {
         // Map change detection: plugin_cfg of new map
-        if (!equal(g_szPrevMap, g_szNextMap))
+        if (!equal(g_szPrevMap, szNextMap))
         {
-            Webhook_SendMapChangeEmbed(g_szPrevMap, g_szNextMap);
-            copy(g_szPrevMap, charsmax(g_szPrevMap), g_szNextMap);
+            Webhook_SendMapChangeEmbed(g_szPrevMap, szNextMap);
+            copy(g_szPrevMap, charsmax(g_szPrevMap), szNextMap);
         }
         // Reset map change flag after handling
         g_bChangingMap = false;
@@ -184,7 +181,7 @@ public Task_ReadCvarsAndHandle(iTaskId)
 public server_changelevel(szMap[])
 {
     // Engine-level map change (engine_changelevel). Mark as changing map for plugin_end differentiation
-    copy(g_szNextMap, charsmax(g_szNextMap), szMap);
+    #pragma unused szMap
     g_bChangingMap = true;
 }
 
@@ -199,12 +196,8 @@ public plugin_end()
 {
     // plugin_end is called on map change AND on server shutdown/unload.
     // g_bChangingMap distinguishes the two (best-effort; covers changelevel/map/amx_map and engine_changelevel)
-    if (equal(g_szWebhookUrl, ""))
-    {
-        get_pcvar_string(g_pCvarWebhookUrl, g_szWebhookUrl, charsmax(g_szWebhookUrl));
-        trim(g_szWebhookUrl);
-        if (equal(g_szWebhookUrl, "")) return;
-    }
+    new szUrl[MAX_WEBHOOK_URL];
+    if (!Webhook_GetUrl(szUrl, charsmax(szUrl))) return;
 
     new szCurrentMap[64];
     get_mapname(szCurrentMap, charsmax(szCurrentMap));
@@ -233,8 +226,6 @@ public client_putinserver(id)
 {
     if (is_user_bot(id) || is_user_hltv(id)) return;
 
-    get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
-
     // Delay to ensure SteamID/name propagated and to avoid spam on fast reconnects.
     // Use offset task id so it never collides with TASK_CFG or other plugins' raw ids.
     remove_task(id + TASK_CONNECT_BASE);
@@ -247,10 +238,11 @@ public Task_DelayedConnect(iTaskId)
     if (id < 1 || id > 32) return;
     if (!is_user_connected(id) || is_user_bot(id) || is_user_hltv(id)) return;
 
-    get_user_name(id, g_szPlayerName[id], charsmax(g_szPlayerName[]));
-    if (g_szPlayerName[id][0] == EOS) return;
+    new szName[32];
+    get_user_name(id, szName, charsmax(szName));
+    if (szName[0] == EOS) return;
 
-    Webhook_SendPlain("%s connected (%d online)", g_szPlayerName[id], GetRealPlayerCount());
+    Webhook_SendPlain("%s connected (%d online)", szName, GetRealPlayerCount());
 }
 
 public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
@@ -262,24 +254,16 @@ public client_disconnected(id, bool:drop, szMessage[], iMaxLen)
 
     if (is_user_bot(id) || is_user_hltv(id)) return;
 
+    // The entity is still valid here (the forward runs before the player is
+    // removed), so the name can be read directly.
+    new szName[32];
+    get_user_name(id, szName, charsmax(szName));
+    if (szName[0] == EOS) return;
+
     // Remaining count: leaving player hasn't disconnected at this point so minus one
     new iOnline = GetRealPlayerCount() - 1;
 
-    // g_szPlayerName still holds nickname since entity is still valid here
-    if (g_szPlayerName[id][0] != EOS)
-    {
-        Webhook_SendPlain("%s disconnected (%d online)", g_szPlayerName[id], iOnline);
-    }
-    else
-    {
-        new szName[32];
-        get_user_name(id, szName, charsmax(szName));
-        if (szName[0] != EOS)
-        {
-            Webhook_SendPlain("%s disconnected (%d online)", szName, iOnline);
-        }
-    }
-    g_szPlayerName[id][0] = EOS;
+    Webhook_SendPlain("%s disconnected (%d online)", szName, iOnline);
 }
 
 stock GetRealPlayerCount()
@@ -333,8 +317,6 @@ public OnChat(id)
 
     new szName[32];
     get_user_name(id, szName, charsmax(szName));
-    // Update cache
-    copy(g_szPlayerName[id], charsmax(g_szPlayerName[]), szName);
 
     // Prefixes
     new szTeamPrefix[8] = "";
@@ -829,34 +811,39 @@ stock Webhook_SendPlain(const szFmt[], any:...)
     Webhook_PostPlain(szMsg, false);
 }
 
-// Plain content POST
-// bForget: false=EZH_CANCEL_REQUEST (callback with EZH_REQUEST_CANCELLED on map change),
-//          true =EZH_FORGET_REQUEST (fire-and-forget, completes after ServerDeactivate, no callback)
-//          Only plugin_end passes true so shutdown/MapEnded webhooks are not lost.
-stock Webhook_PostPlain(const szContent[], bool:bForget)
+// Reads amx_webhook_url (trimmed). Returns false when it is unset.
+stock bool:Webhook_GetUrl(szUrl[], iLen)
 {
-    if (equal(g_szWebhookUrl, ""))
-    {
-        get_pcvar_string(g_pCvarWebhookUrl, g_szWebhookUrl, charsmax(g_szWebhookUrl));
-        trim(g_szWebhookUrl);
-        if (equal(g_szWebhookUrl, ""))
-        {
-            log_amx("[Webhook] amx_webhook_url not set — dropping: %s", szContent);
-            return;
-        }
-    }
+    get_pcvar_string(g_pCvarWebhookUrl, szUrl, iLen);
+    trim(szUrl);
+    return szUrl[0] != EOS;
+}
 
-    new EzJSON:obj = ezjson_init_object();
-    if (obj == EzInvalid_JSON)
+// Applies amx_webhook_botname as the webhook username, when configured.
+stock Webhook_SetBotName(EzJSON:obj)
+{
+    new szBotName[64];
+    get_pcvar_string(g_pCvarBotName, szBotName, charsmax(szBotName));
+    if (szBotName[0] != EOS)
     {
-        log_amx("[Webhook] ezjson_init_object failed");
+        ezjson_object_set_string(obj, "username", szBotName);
+    }
+}
+
+// Serializes and posts obj through the shared queue, then frees obj.
+// bForget: false = EZH_CANCEL_REQUEST (callback gets EZH_REQUEST_CANCELLED on
+//                    map change),
+//          true  = EZH_FORGET_REQUEST (completes after ServerDeactivate, no
+//                    callback). Only plugin_end passes true so shutdown /
+//                    Map Ended webhooks are not lost.
+stock Webhook_PostJson(EzJSON:obj, bool:bForget)
+{
+    new szUrl[MAX_WEBHOOK_URL];
+    if (!Webhook_GetUrl(szUrl, charsmax(szUrl)))
+    {
+        ezjson_free(obj);
+        log_amx("[Webhook] amx_webhook_url not set — dropping");
         return;
-    }
-
-    ezjson_object_set_string(obj, "content", szContent);
-    if (g_szBotName[0] != EOS)
-    {
-        ezjson_object_set_string(obj, "username", g_szBotName);
     }
 
     new EzHttpOptions:opts = ezhttp_create_options();
@@ -865,14 +852,31 @@ stock Webhook_PostPlain(const szContent[], bool:bForget)
     ezjson_free(obj);
 
     ezhttp_option_set_queue(opts, g_Queue);
+    ezhttp_option_set_connect_timeout(opts, 5000);
+    ezhttp_option_set_timeout(opts, 10000);
     if (bForget)
     {
         ezhttp_option_set_plugin_end_behaviour(opts, EZH_FORGET_REQUEST);
     }
 
-    ezhttp_post(g_szWebhookUrl, "OnHttpComplete", opts);
+    ezhttp_post(szUrl, "OnHttpComplete", opts);
 
     // opts variable auto-destroys itself
+}
+
+// Plain content POST
+stock Webhook_PostPlain(const szContent[], bool:bForget)
+{
+    new EzJSON:obj = ezjson_init_object();
+    if (obj == EzInvalid_JSON)
+    {
+        log_amx("[Webhook] ezjson_init_object failed");
+        return;
+    }
+
+    ezjson_object_set_string(obj, "content", szContent);
+    Webhook_SetBotName(obj);
+    Webhook_PostJson(obj, bForget);
 }
 
 // Embed for map change (prev -> next)
@@ -883,24 +887,10 @@ stock Webhook_SendMapChangeEmbed(const szPrev[], const szNext[])
     Webhook_SendEmbedRaw("Map Change", szDesc, 0x3498DB, false);
 }
 
-// see bForget doc on Webhook_PostPlain
+// see bForget doc on Webhook_PostJson
 stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget)
 {
-    if (equal(g_szWebhookUrl, ""))
-    {
-        get_pcvar_string(g_pCvarWebhookUrl, g_szWebhookUrl, charsmax(g_szWebhookUrl));
-        trim(g_szWebhookUrl);
-        if (equal(g_szWebhookUrl, ""))
-        {
-            log_amx("[Webhook] amx_webhook_url not set — dropping embed: %s", szDesc);
-            return;
-        }
-    }
-
-    // Build Discord embed JSON: { content:"", embeds:[{title, description, color, timestamp}] }
-    new szTimestamp[32];
-    format_time(szTimestamp, charsmax(szTimestamp), "%Y-%m-%dT%H:%M:%SZ", get_systime());
-
+    // Build Discord embed JSON: { content:"", embeds:[{title, description, color}] }
     new EzJSON:obj = ezjson_init_object();
     new EzJSON:arr = ezjson_init_array();
     new EzJSON:embed = ezjson_init_object();
@@ -917,7 +907,6 @@ stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget
     ezjson_object_set_string(embed, "title", szTitle);
     ezjson_object_set_string(embed, "description", szDesc);
     ezjson_object_set_number(embed, "color", iColor);
-    ezjson_object_set_string(embed, "timestamp", szTimestamp);
 
     ezjson_array_append_value(arr, embed);
     ezjson_free(embed);
@@ -925,28 +914,21 @@ stock Webhook_SendEmbedRaw(const szTitle[], const szDesc[], iColor, bool:bForget
     ezjson_object_set_value(obj, "embeds", arr);
     ezjson_free(arr);
 
-    if (g_szBotName[0] != EOS)
-    {
-        ezjson_object_set_string(obj, "username", g_szBotName);
-    }
-
-    new EzHttpOptions:opts = ezhttp_create_options();
-    ezhttp_option_set_header(opts, "Content-Type", "application/json");
-    ezhttp_option_set_body_from_json(opts, obj, false);
-    ezjson_free(obj);
-
-    ezhttp_option_set_queue(opts, g_Queue);
-    if (bForget)
-    {
-        ezhttp_option_set_plugin_end_behaviour(opts, EZH_FORGET_REQUEST);
-    }
-
-    ezhttp_post(g_szWebhookUrl, "OnHttpComplete", opts);
+    Webhook_SetBotName(obj);
+    Webhook_PostJson(obj, bForget);
 }
 
 public OnHttpComplete(EzHttpRequest:request_id)
 {
     new EzHttpErrorCode:iErr = ezhttp_get_error_code(request_id);
+
+    // Map change / plugin unload cancels queued requests (EZH_CANCEL_REQUEST);
+    // that is expected and must not be logged as a failure.
+    if (iErr == EZH_REQUEST_CANCELLED)
+    {
+        return;
+    }
+
     if (iErr != EZH_OK)
     {
         new szErr[128];

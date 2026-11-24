@@ -80,9 +80,9 @@ No `@mentions`, no SteamID/IP/hostname broadcasting.
 | `amx_webhook_url`     | `""`            | **Required.** Single Discord webhook URL. Keep private (protected flag). |
 | `amx_webhook_botname` | `CS 1.6 Server` | Username shown in Discord messages                                       |
 
-All messages are queued via `EzHttpQueue` and sent with `Content-Type: application/json`. Requests that would be interrupted by map change use `EZH_FORGET_REQUEST` (fire-and-forget) so the `Map Ended` webhook still fires.
+All messages are queued via `EzHttpQueue` and sent with `Content-Type: application/json`. Each request uses a 5 s connect timeout and a 10 s total timeout, so a stalled connection cannot block the shared queue. `amx_webhook_url` and `amx_webhook_botname` are read per request, so RCON changes take effect immediately. Requests cancelled by a map change (`EZH_REQUEST_CANCELLED`) are expected and are not logged as failures.
 
-`bForget` (`bool:bForget` in `Webhook_PostPlain`/`Webhook_SendEmbedRaw`) maps to `EzHttpPluginEndBehaviour` (`easy_http.inc`): `false` = `EZH_CANCEL_REQUEST` (default, callback receives `EZH_REQUEST_CANCELLED` on map change), `true` = `EZH_FORGET_REQUEST` (request completes after `ServerDeactivate` but callback is not invoked). The plugin passes `true` only in `plugin_end` so shutdown/map-ended webhooks are not lost.
+`bForget` (`bool:bForget` in `Webhook_PostJson`, used by `Webhook_PostPlain`/`Webhook_SendEmbedRaw`) maps to `EzHttpPluginEndBehaviour` (`easy_http.inc`): `false` = `EZH_CANCEL_REQUEST` (default, callback receives `EZH_REQUEST_CANCELLED` on map change), `true` = `EZH_FORGET_REQUEST` (request completes after `ServerDeactivate` but callback is not invoked). The plugin passes `true` only in `plugin_end` so shutdown/map-ended webhooks are not lost.
 
 `log_amx` writes to `cstrike/addons/amxmodx/logs/L<YYYYMMDD>.log` (daily log) and mirrors to console. Check `addons/amxmodx/logs/` for `[Webhook] amx_webhook_url not set` or `[Webhook] POST failed err=...`.
 
