@@ -57,12 +57,71 @@ one.
 
 ### Rulesets
 
-**Settings -> Rules -> Rulesets**:
+**Settings -> Rules -> Rulesets -> New ruleset**. Create two rulesets:
 
-- **`main` branch**: block force pushes and deletions; require the
-  `Build (Linux)` and `Build (Windows)` status checks. Requiring a pull request
-  is optional for a solo maintainer.
-- **`v*` tag**: restrict creations and deletions to maintainers.
+- **`main` branch**: block force pushes and deletions, and require the
+  `Build (Linux)` and `Build (Windows)` status checks to pass before merging.
+- **`v*` tags**: block updates, deletions and force pushes so release tags stay
+  immutable. Leave *Restrict creations* off unless you also add an admin
+  bypass.
+
+Rulesets are additive. Prefer them over classic branch protection and do not
+configure both for the same branch. Rules apply to you as well unless you add
+yourself to the bypass list.
+
+#### `main` branch ruleset
+
+Choose **New branch ruleset**:
+
+- **Target**: *Include by pattern* -> `main` (or `~DEFAULT_BRANCH`).
+- **Enforcement**: *Active*.
+- **Bypass**: *Repository admin*. This is an escape hatch (for example,
+  renaming the default branch requires it while force pushes are blocked).
+  Remove it if you want no exceptions.
+
+| Rule | Setting | Why |
+| --- | --- | --- |
+| Restrict deletions | on | Prevents deleting `main` by accident or by a collaborator. |
+| Block force pushes | on | Keeps published history append-only. |
+| Require status checks to pass | on: `Build (Linux)`, `Build (Windows)` | Refuses to merge a pull request whose build fails. |
+| Require branches to be up to date before merging | optional | Strict re-runs both builds after every base-branch update; usually unnecessary for a solo repository. |
+| Require a pull request before merging | optional | The only way to make the status checks gate changes (see below). |
+| Require linear history | optional | Only useful if you also allow squash/rebase merges and want no merge commits. |
+| Require signed commits | off | Only enable if you already sign commits. |
+| Require secret scanning alerts are resolved | optional | Extra protection for pull requests once secret scanning is enabled. |
+| Code scanning, Code Quality, deployments | off | No analyzer or deployment target exists here. |
+
+Required status checks gate **merges**, not direct pushes. If you keep pushing
+straight to `main`, the builds still run, but nothing blocks a failing commit.
+To make CI mandatory, enable *Require a pull request before merging* with
+**0 required approvals** - you can still self-merge, but every change goes
+through a pull request where both builds must pass.
+
+The check names (`Build (Linux)`, `Build (Windows)`) come from the job `name:`
+values and only appear in the picker after the workflow has run on the default
+branch at least once.
+
+#### `v*` tag ruleset
+
+Choose **New tag ruleset**:
+
+- **Target**: *Include by pattern* -> `v*`.
+- **Enforcement**: *Active*.
+- **Bypass**: *Repository admin*.
+
+| Rule | Setting | Why |
+| --- | --- | --- |
+| Restrict updates | on | Stops a tag from being re-pointed at a different commit. |
+| Restrict deletions | on | Stops `git push origin :v1.3.0`. |
+| Block force pushes | on | Belt-and-braces with *Restrict updates*. |
+| Restrict creations | off | With no bypass, enabling this prevents anyone - including you - from creating `v*` tags. If you want it on, add *Repository admin* to the bypass list. |
+
+This makes release tags immutable, which matters because the release job
+builds exactly the tagged commit. It also affects the recovery flow below:
+deleting a tag requires a bypass actor.
+
+Push rulesets (the third ruleset type) only apply to private or internal
+repositories, so they are not used here.
 
 ### Repository metadata
 
@@ -158,6 +217,10 @@ Manual runs (`workflow_dispatch`) and pull requests build but never publish.
   git tag -d v1.3.0
   git push origin :v1.3.0
   ```
+
+  With the `v*` tag ruleset active, deleting the tag requires a bypass actor
+  (for example *Repository admin*). If the bypass is not configured, pause the
+  ruleset, delete the tag, then re-enable it.
 
 - **Assets are wrong**: re-run the `Release` job from the Actions tab. It
   re-uploads the assets with `--clobber`.
