@@ -94,6 +94,19 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Verify tag matches plugin version
+        run: |
+          SOURCE_VERSION=$(sed -n 's/^#define VERSION "\([^"]*\)".*/\1/p' "amxmodx/scripting/${PLUGIN_NAME}.sma")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$SOURCE_VERSION" ]; then
+            echo "Could not read VERSION from amxmodx/scripting/${PLUGIN_NAME}.sma" >&2
+            exit 1
+          fi
+          if [ "$SOURCE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match plugin VERSION '${SOURCE_VERSION}'" >&2
+            exit 1
+          fi
+
       - name: Download compiled plugin
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -118,10 +131,18 @@ jobs:
             "SHA256SUMS"
             "${PLUGIN_NAME}-${GITHUB_REF_NAME}-source.zip"
           )
+          RELEASE_FLAGS=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            RELEASE_FLAGS+=(--prerelease)
+          fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --clobber
+            if [ ${#RELEASE_FLAGS[@]} -gt 0 ]; then
+              gh release edit "$GITHUB_REF_NAME" "${RELEASE_FLAGS[@]}"
+            fi
           else
             gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" \
               --title "$GITHUB_REF_NAME" \
-              --generate-notes
+              --generate-notes \
+              "${RELEASE_FLAGS[@]}"
           fi
