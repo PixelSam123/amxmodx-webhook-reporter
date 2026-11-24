@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Igor Minin
+// Vendored from Next21Team/AmxxEasyHttp v1.5.0 (unmodified apart from this header).
+// See THIRD-PARTY-NOTICES.md for the full license text.
+
 #if defined _easy_http_json_included
     #endinput
 #endif

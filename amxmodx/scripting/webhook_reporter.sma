@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 PixelSam123
+
 #pragma semicolon 1
 
 #include <amxmodx>
