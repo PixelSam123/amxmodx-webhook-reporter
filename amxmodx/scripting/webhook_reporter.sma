@@ -187,8 +187,13 @@ public server_changelevel(szMap[])
 
 public OnMapCmd(id, level, cid)
 {
-    // Any map command issued -> treat next plugin_end as map end, not shutdown
-    g_bChangingMap = true;
+    // changelevel/map are server-console commands; amx_map/amx_changelevel
+    // require ADMIN_MAP. Do not flag a denied attempt as a map change.
+    #pragma unused level, cid
+    if (id == 0 || (get_user_flags(id) & ADMIN_MAP))
+    {
+        g_bChangingMap = true;
+    }
     return PLUGIN_CONTINUE;
 }
 
@@ -319,23 +324,21 @@ public OnChat(id)
     get_user_name(id, szName, charsmax(szName));
 
     // Prefixes
-    new szTeamPrefix[8] = "";
-    new CsTeams:iTeam = cs_get_user_team(id);
-    if (iTeam == CS_TEAM_T)
+    new szTeamPrefix[8];
+    switch (_:cs_get_user_team(id))
     {
-        copy(szTeamPrefix, charsmax(szTeamPrefix), "(A)");
-    }
-    else if (iTeam == CS_TEAM_CT)
-    {
-        copy(szTeamPrefix, charsmax(szTeamPrefix), "(D)");
-    }
-    else if (iTeam == CS_TEAM_SPECTATOR)
-    {
-        copy(szTeamPrefix, charsmax(szTeamPrefix), "(SPEC)");
-    }
-    else
-    {
-        copy(szTeamPrefix, charsmax(szTeamPrefix), "(SPEC)");
+        case CS_TEAM_T:
+        {
+            copy(szTeamPrefix, charsmax(szTeamPrefix), "(A)");
+        }
+        case CS_TEAM_CT:
+        {
+            copy(szTeamPrefix, charsmax(szTeamPrefix), "(D)");
+        }
+        default:
+        {
+            copy(szTeamPrefix, charsmax(szTeamPrefix), "(SPEC)");
+        }
     }
 
     new bool:bIsDead = !is_user_alive(id);
@@ -368,33 +371,25 @@ public OnChat(id)
     return PLUGIN_CONTINUE;
 }
 
-// Strip color codes ^1-^4 (and ^x variants). Also strip !g/!y/!t common chat colors
+// Strip chat color codes. In Pawn "^1".."^9" are the control bytes 0x01..0x09
+// (CS uses 0x01-0x04 for colors), so strip them in one pass; also remove the
+// common "!g/!y/!t" chat tags and collapse double spaces.
 stock StripColors(szMsg[], iLen)
 {
-    // Remove ^1 ^2 ^3 ^4
-    replace_all(szMsg, iLen, "^1", "");
-    replace_all(szMsg, iLen, "^2", "");
-    replace_all(szMsg, iLen, "^3", "");
-    replace_all(szMsg, iLen, "^4", "");
-    // Remove ^x01 etc. (some plugins use \x01)
-    // Also strip ^0, ^5-^9 just in case
-    replace_all(szMsg, iLen, "^0", "");
-    replace_all(szMsg, iLen, "^5", "");
-    replace_all(szMsg, iLen, "^6", "");
-    replace_all(szMsg, iLen, "^7", "");
-    replace_all(szMsg, iLen, "^8", "");
-    replace_all(szMsg, iLen, "^9", "");
-    // Remove literal color tags like !g !y !t (common in chat printers)
-    // Do not strip leading ! if it's command prefix — that's already filtered above before strip
-    // So here we remove embedded !g etc.
-    // Simple: replace " !g " variants? We'll remove "!g", "!y", "!t" substrings
-    // But keep legitimate "!" inside message? For stripping we remove those tags.
+    new iOut = 0;
+    for (new i = 0; i <= iLen && szMsg[i]; i++)
+    {
+        if (szMsg[i] >= 0x01 && szMsg[i] <= 0x09)
+        {
+            continue;
+        }
+        szMsg[iOut++] = szMsg[i];
+    }
+    szMsg[iOut] = EOS;
+
     replace_all(szMsg, iLen, "!g", "");
     replace_all(szMsg, iLen, "!y", "");
     replace_all(szMsg, iLen, "!t", "");
-    // Also strip ^x color escape if somehow present as single char 0x03
-    // Can't easily detect binary, but trim again
-    // Replace double spaces
     replace_all(szMsg, iLen, "  ", " ");
 }
 
