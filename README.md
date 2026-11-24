@@ -166,10 +166,14 @@ Pushes to `main` and pull requests trigger `.github/workflows/build.yml`:
 - Uses the vendored `easy_http.inc` / `easy_http_json.inc` from `amxmodx/scripting/include/`
 - Compiles `amxmodx/scripting/webhook_reporter.sma` -> `amxmodx/scripting/compiled/webhook_reporter.amxx` on Linux and Windows
 - Uploads the `webhook_reporter.amxx` artifact from the Linux job
+- On `v*` tags, verifies the tag matches `#define VERSION` and publishes a GitHub Release (tags containing `-` become pre-releases)
 
 Download the artifact from the Actions tab, or push a `v*` tag to build and
 publish a GitHub Release containing `webhook_reporter.amxx`, `SHA256SUMS`, and
 a source archive.
+
+Maintainers: see [`RELEASING.md`](RELEASING.md) for the release runbook and
+the recommended repository settings.
 
 ### Local
 
