@@ -18,11 +18,25 @@
 #define TASK_CFG          9876
 #define TASK_ROUND        9877
 #define TASK_HALFTIME     9878
+#define TASK_PUG_POLL     9879
 #define TASK_CONNECT_BASE 5000
 
 #define COLOR_HALFTIME    0xE67E22
 #define COLOR_RESTART     0xF1C40F
 #define COLOR_CANCEL      0x95A5A6
+
+// CPugMod::SetState values exposed through the `pug_state` cvar (PugMod.h).
+#define PUG_STATE_DEAD        0
+#define PUG_STATE_DEATHMATCH  1
+#define PUG_STATE_VOTEMAP     2
+#define PUG_STATE_VOTETEAM    3
+#define PUG_STATE_CAPTAIN     4
+#define PUG_STATE_KNIFE       5
+#define PUG_STATE_FIRST_HALF  6
+#define PUG_STATE_HALFTIME    7
+#define PUG_STATE_SECOND_HALF 8
+#define PUG_STATE_OVERTIME    9
+#define PUG_STATE_END         10
 
 new g_pCvarWebhookUrl;
 new g_pCvarBotName;
@@ -43,17 +57,23 @@ new EzHttpQueue:g_Queue;
 
 new g_szPlayerName[MAX_PLAYERS + 1][32];
 new g_iMsgTeamScore;
-new g_iMsgSayText;
 
-// PugMod (SmileYzn/PugMod) halftime handling.
+// PugMod (SmileYzn/PugMod) match-state tracking.
+// g_bPugStateMode: PugMod is present and exposes `pug_state` (updated by
+// CPugMod::SetState on every transition). State is read from that cvar instead
+// of hooking SayText: hooking SayText makes AMXX swallow/re-emit every game
+// chat line, which duplicated player chat in-game.
 // g_bPugMode: use plugin-side cumulative totals instead of TeamScore messages
 // (PugMod zeroes team slots at halftime via m_bCompleteReset and rewrites the
 // TeamScore message args when pug_score_teams=1, so the raw message is not a
 // reliable score source). Cumulative totals live in g_iTotalT/g_iTotalCT.
+// g_bPugFallback: older PugMod without `pug_state`; infer halftime from rounds.
 new bool:g_bPugMode;
 new bool:g_bPugFallback;
-new bool:g_bPugSaySeen;
-new bool:g_bPugLive;
+new bool:g_bPugStateMode;
+new g_pCvarPugState;
+new g_iPugState;
+new g_iPugRounds = 30;
 new g_iTotalT;
 new g_iTotalCT;
 new g_iPugRegHalf;
@@ -62,9 +82,12 @@ new g_iPugHalfRounds;
 new g_iPugHalfTimes;
 new bool:g_bHalftimePending;
 new bool:g_bHalftimeSwap;
-// Guards duplicate restart/cancel embeds while the resulting state transition
-// ("First Half started" / next match) is still pending.
-new bool:g_bMatchEventGuard;
+new g_iHalftimeScoreT;
+new g_iHalftimeScoreD;
+// A match finished normally (pug_state END). Suppresses the restart/cancel
+// embeds during the post-match transitions (END -> Vote Map/Deathmatch -> next
+// match) until a new First Half starts.
+new bool:g_bPugEnded;
 
 public plugin_init()
 {
@@ -75,14 +98,6 @@ public plugin_init()
 
     g_Queue = ezhttp_create_queue();
     g_iMsgTeamScore = get_user_msgid("TeamScore");
-    g_iMsgSayText   = get_user_msgid("SayText");
-
-    // PugMod broadcasts its state transitions via SayText ("... started: Get ready!!",
-    // "Automatically swapping teams.") — used for halftime detection + live gating.
-    if (g_iMsgSayText > 0)
-    {
-        register_message(g_iMsgSayText, "OnSayText");
-    }
 
     register_clcmd("say", "OnChat");
     register_clcmd("say_team", "OnChat");
@@ -153,15 +168,14 @@ public Task_ReadCvarsAndHandle(iTaskId)
     g_iTotalCT = 0;
     g_iPugHalfRounds = 0;
     g_iPugHalfTimes = 0;
-    g_bPugLive = false;
-    g_bPugSaySeen = false;
+    g_bPugEnded = false;
     g_bPendingTWin = false;
     g_bPendingDraw = false;
     g_bHalftimePending = false;
     g_bHalftimeSwap = false;
-    g_bMatchEventGuard = false;
     // Drop any pending round/halftime embed from the previous map so it
-    // doesn't fire with reset scores on the new map.
+    // doesn't fire with reset scores on the new map. Pug_ReadConfig() also
+    // restarts the pug_state poll task.
     remove_task(TASK_ROUND);
     remove_task(TASK_HALFTIME);
     Pug_ReadConfig();
@@ -427,11 +441,14 @@ public OnTeamScore(iMsgId, iDest, id)
 
 public OnTWin()
 {
-    // T = Attackers. Under PugMod, suppress knife round / dead-phase audio wins
-    // (live flag only set while a half is being played).
-    if (g_bPugMode && g_bPugSaySeen && !g_bPugLive) return;
-
-    if (g_bPugMode)
+    // T = Attackers. Under PugMod only scoring halves count; knife rounds,
+    // warmup and deathmatch are excluded (pug_state is read at event time).
+    if (g_bPugStateMode)
+    {
+        if (!Pug_IsLiveState()) return;
+        g_iTotalT++;
+    }
+    else if (g_bPugMode)
     {
         g_iTotalT++;
         Pug_CountRegulationRound();
@@ -448,9 +465,12 @@ public OnTWin()
 public OnCTWin()
 {
     // CT = Defenders
-    if (g_bPugMode && g_bPugSaySeen && !g_bPugLive) return;
-
-    if (g_bPugMode)
+    if (g_bPugStateMode)
+    {
+        if (!Pug_IsLiveState()) return;
+        g_iTotalCT++;
+    }
+    else if (g_bPugMode)
     {
         g_iTotalCT++;
         Pug_CountRegulationRound();
@@ -464,7 +484,7 @@ public OnCTWin()
 
 public OnRoundDraw()
 {
-    if (g_bPugMode && g_bPugSaySeen && !g_bPugLive) return;
+    if (g_bPugStateMode && !Pug_IsLiveState()) return;
 
     g_bPendingTWin = false;
     g_bPendingDraw = true;
@@ -479,31 +499,98 @@ public Task_SendRoundEmbed(iTaskId)
 }
 
 // ---------------------------------------------------------------------------
-// PugMod halftime (SmileYzn/PugMod) — detection + side swap + cumulative score
+// PugMod match state (SmileYzn/PugMod) — pug_state polling + cumulative score
 // ---------------------------------------------------------------------------
 
-// Read pug_rounds / pug_rounds_ot; when present, enable cumulative match-score
-// tracking and the fallback halftime calculation (no dedicated halftime event
-// exists in PugMod, but it always prints SayText state messages — fallback only
-// kicks in while none of them have been observed on this map).
+// Detect PugMod through its cvars and enable the appropriate mode:
+// - `pug_state`: authoritative state (PugMod writes it from SetState on every
+//   transition), so poll it for halftime/restart/cancel/end/live gating.
+// - `pug_rounds` + `pug_rounds_ot` without `pug_state` (older PugMod): keep the
+//   round-count halftime fallback.
 stock Pug_ReadConfig()
 {
+    remove_task(TASK_PUG_POLL);
+
+    g_bPugMode = false;
+    g_bPugFallback = false;
+    g_bPugStateMode = false;
+    g_pCvarPugState = 0;
+    g_iPugRounds = 30;
+    g_iPugRegHalf = 0;
+    g_iPugOTHalf = 0;
+
+    new pState = get_cvar_pointer("pug_state");
     new pRounds = get_cvar_pointer("pug_rounds");
     new pRoundsOT = get_cvar_pointer("pug_rounds_ot");
 
-    g_bPugFallback = false;
+    // get_cvar_pointer returns 0 when the cvar does not exist (older AMXX
+    // builds returned -1), so treat both as "missing".
+    new bool:bHasState = (pState != 0 && pState != -1);
+    new bool:bHasRounds = (pRounds != 0 && pRounds != -1);
+    new bool:bHasRoundsOT = (pRoundsOT != 0 && pRoundsOT != -1);
 
-    if (pRounds != -1 && pRoundsOT != -1)
+    if (bHasRounds)
     {
-        g_iPugRegHalf = get_pcvar_num(pRounds) / 2;
-        g_iPugOTHalf = get_pcvar_num(pRoundsOT) / 2;
-
-        if (g_iPugRegHalf > 0)
-        {
-            g_bPugFallback = true;
-            g_bPugMode = true;
-        }
+        g_iPugRounds = get_pcvar_num(pRounds);
+        g_iPugRegHalf = g_iPugRounds / 2;
     }
+
+    if (bHasRoundsOT)
+    {
+        g_iPugOTHalf = get_pcvar_num(pRoundsOT) / 2;
+    }
+
+    if (bHasState)
+    {
+        g_pCvarPugState = pState;
+        g_bPugStateMode = true;
+        g_bPugMode = true;
+        g_iPugState = Pug_ReadState();
+
+        // 0.25s: Halftime lasts 3s and End lasts ~mp_round_restart_delay, so
+        // every transition is observed well before the next one.
+        set_task(0.25, "Task_PugPoll", TASK_PUG_POLL, _, _, "b");
+        return;
+    }
+
+    if (bHasRounds && bHasRoundsOT && g_iPugRegHalf > 0)
+    {
+        g_bPugFallback = true;
+        g_bPugMode = true;
+    }
+}
+
+// Current CPugMod::SetState value (pug_state is a string cvar).
+stock Pug_ReadState()
+{
+    if (!g_pCvarPugState)
+    {
+        return PUG_STATE_DEAD;
+    }
+
+    new szState[16];
+    get_pcvar_string(g_pCvarPugState, szState, charsmax(szState));
+    return str_to_num(szState);
+}
+
+// A scoring half is being played; knife rounds, warmup and deathmatch are not
+// live, so they must not count towards the match score or emit round embeds.
+stock bool:Pug_IsLiveState()
+{
+    if (!g_bPugStateMode)
+    {
+        return false;
+    }
+
+    new iState = Pug_ReadState();
+    return (iState == PUG_STATE_FIRST_HALF
+        || iState == PUG_STATE_SECOND_HALF
+        || iState == PUG_STATE_OVERTIME);
+}
+
+stock bool:Pug_MatchInProgress()
+{
+    return (g_iTotalT > 0 || g_iTotalCT > 0 || g_iPugHalfTimes > 0);
 }
 
 // Zero cumulative score + per-half state and drop pending round/halftime
@@ -522,31 +609,41 @@ stock Pug_ResetMatchScore()
     remove_task(TASK_HALFTIME);
 }
 
-// In-place removal of HL color control bytes (0x01-0x04) that PugMod's
-// PrintColor injects mid-phrase (e.g. "State changed: \x03Dead."), plus
-// literal ^1-^4 remnants, so substring matching sees contiguous text.
-stock StripSayControl(szMsg[], iLen)
+// Capture the pre-swap score, apply the side swap (if any) and queue the
+// Halftime embed. Swapping now keeps later round wins aligned with the new
+// T/CT slots; the embed still reports the pre-swap score.
+stock Pug_ScheduleHalftime(bool:bSwap, Float:fDelay)
 {
-    new iOut = 0;
-    for (new i = 0; i <= iLen && szMsg[i]; i++)
-    {
-        if (szMsg[i] >= 0x01 && szMsg[i] <= 0x04) continue;
-        szMsg[iOut++] = szMsg[i];
-    }
-    szMsg[iOut] = EOS;
+    new iT = g_iTotalT;
+    new iD = g_iTotalCT;
 
-    replace_all(szMsg, iLen, "^1", "");
-    replace_all(szMsg, iLen, "^2", "");
-    replace_all(szMsg, iLen, "^3", "");
-    replace_all(szMsg, iLen, "^4", "");
+    g_iHalftimeScoreT = iT;
+    g_iHalftimeScoreD = iD;
+    g_bHalftimeSwap = bSwap;
+    g_bHalftimePending = true;
+    g_iPugHalfTimes++;
+    g_iPugHalfRounds = 0;
+
+    if (bSwap)
+    {
+        // Totals belong to the player group; exchanging them keeps them aligned
+        // with the current T/CT slots (same as PugMod's SWAP(m_Score[...]) and
+        // ReGameDLL's SwapAllPlayers).
+        g_iTotalT = iD;
+        g_iTotalCT = iT;
+    }
+
+    remove_task(TASK_HALFTIME);
+    set_task(fDelay, "Task_Halftime", TASK_HALFTIME);
 }
 
-// Fallback halftime: PugMod switches sides after pug_rounds/2 wins in each
-// regulation half and after pug_rounds_ot/2 wins in each overtime half.
-// Only counts T/CT round wins (draws and knife rounds do not score).
+// Fallback halftime (older PugMod without pug_state): PugMod switches sides
+// after pug_rounds/2 wins in each regulation half and after pug_rounds_ot/2
+// wins in each overtime half. Only counts T/CT round wins (draws and knife
+// rounds do not score).
 stock Pug_CountRegulationRound()
 {
-    if (!g_bPugFallback || g_bPugSaySeen) return;
+    if (!g_bPugFallback) return;
 
     g_iPugHalfRounds++;
 
@@ -554,157 +651,95 @@ stock Pug_CountRegulationRound()
 
     if (iThreshold > 0 && g_iPugHalfRounds >= iThreshold)
     {
-        g_bHalftimeSwap = true;
-        g_bHalftimePending = true;
         // Fire after the 1.0s round-finished embed so Discord sees the round
-        // first, then halftime.
-        set_task(1.5, "Task_Halftime", TASK_HALFTIME);
+        // first, then halftime. The fallback assumes a side swap.
+        Pug_ScheduleHalftime(true, 1.5);
     }
 }
 
-public OnSayText(iMsgId, iDest, id)
+public Task_PugPoll(iTaskId)
 {
-    #pragma unused iMsgId, iDest, id
+    #pragma unused iTaskId
 
-    // SayText args: 1 = sender index, 2 = format ("%s"), 3 = message
-    new szText[192];
-    get_msg_arg_string(3, szText, charsmax(szText));
+    if (!g_bPugStateMode) return;
 
-    if (szText[0] == EOS)
+    new iState = Pug_ReadState();
+    if (iState == g_iPugState) return;
+
+    new iOldState = g_iPugState;
+    g_iPugState = iState;
+    Pug_OnStateChange(iOldState, iState);
+}
+
+stock Pug_OnStateChange(iOldState, iNewState)
+{
+    switch (iNewState)
     {
-        return PLUGIN_CONTINUE;
-    }
-
-    // PugMod sends state messages MSG_ONE per client: identical text arrives
-    // once per recipient within the same frame — dedupe on text + gametime.
-    static Float:fLastTime = -1.0;
-    static szLastText[192];
-    new Float:ftNow = get_gametime();
-
-    if (ftNow == fLastTime && equal(szLastText, szText))
-    {
-        return PLUGIN_CONTINUE;
-    }
-
-    fLastTime = ftNow;
-    copy(szLastText, charsmax(szLastText), szText);
-
-    // PrintColor embeds color bytes inside the text — normalize before matching.
-    StripSayControl(szText, charsmax(szText));
-
-    // Hardcoded English in PugMod's CPugMod::SwapTeams — printed only when
-    // sides actually switch (not on the tied regulation -> overtime halftime).
-    if (containi(szText, "swapping teams") != -1)
-    {
-        g_bPugMode = true;
-        g_bPugSaySeen = true;
-        g_bHalftimeSwap = true;
-        g_bHalftimePending = true;
-        set_task(0.5, "Task_Halftime", TASK_HALFTIME);
-        return PLUGIN_CONTINUE;
-    }
-
-    // Match restart: vote path prints "The match will be restarted." then
-    // transitions to FIRST_HALF; the admin menu prints "State changed: First
-    // Half." instead. The following "First Half started" is the authoritative
-    // reset either way — this branch adds the embed and kills stale tasks.
-    if (containi(szText, "match will be restarted") != -1
-        || (containi(szText, "State changed") != -1 && containi(szText, "First Half") != -1))
-    {
-        g_bPugMode = true;
-        g_bPugSaySeen = true;
-
-        // Only report when a match was actually in progress: an admin forcing
-        // First Half during the ready phase is not a restart.
-        if (!g_bMatchEventGuard && (g_bPugLive || g_iPugHalfTimes > 0 || g_iTotalT > 0 || g_iTotalCT > 0))
+        case PUG_STATE_FIRST_HALF:
         {
-            new szDesc[192];
-            formatex(szDesc, charsmax(szDesc), "A new match will start shortly. Score was (A/D): %d/%d", g_iTotalT, g_iTotalCT);
-            Webhook_SendEmbedRaw("Match Restarted", szDesc, COLOR_RESTART, false);
-        }
-
-        g_bMatchEventGuard = true;
-        g_bPugLive = false;
-        Pug_ResetMatchScore();
-        return PLUGIN_CONTINUE;
-    }
-
-    // Match cancel: vote path prints "The match will be cancelled." then goes
-    // DEATHMATCH; admin menu prints "State changed: Dead." then DEAD.
-    // "Dead" never matches inside "Deathmatch", so the admin branch is precise.
-    if (containi(szText, "match will be cancelled") != -1
-        || (containi(szText, "State changed") != -1 && containi(szText, "Dead") != -1))
-    {
-        g_bPugMode = true;
-        g_bPugSaySeen = true;
-
-        if (!g_bMatchEventGuard && (g_bPugLive || g_iPugHalfTimes > 0 || g_iTotalT > 0 || g_iTotalCT > 0))
-        {
-            new szDesc[192];
-            formatex(szDesc, charsmax(szDesc), "The match was cancelled. Final score (A/D): %d/%d", g_iTotalT, g_iTotalCT);
-            Webhook_SendEmbedRaw("Match Cancelled", szDesc, COLOR_CANCEL, false);
-        }
-
-        g_bMatchEventGuard = true;
-        g_bPugLive = false;
-        Pug_ResetMatchScore();
-        return PLUGIN_CONTINUE;
-    }
-
-    // State transitions: "[TAG] <State> started: Get ready!!" (color codes used
-    // to split phrases — text is normalized above).
-    if (containi(szText, "started: Get ready") != -1)
-    {
-        g_bPugMode = true;
-        g_bPugSaySeen = true;
-
-        if (containi(szText, "Halftime") != -1)
-        {
-            // Swap message may have already scheduled this halftime; do not
-            // overwrite its swap flag or restart the timer pointlessly.
-            if (!g_bHalftimePending)
+            // Fresh match or restart. Only report a restart when a match was
+            // actually in progress and had not finished normally.
+            if (!g_bPugEnded && Pug_MatchInProgress())
             {
-                g_bHalftimePending = true;
-                set_task(0.5, "Task_Halftime", TASK_HALFTIME);
+                new szDesc[192];
+                formatex(szDesc, charsmax(szDesc), "A new match will start shortly. Score was (A/D): %d/%d", g_iTotalT, g_iTotalCT);
+                Webhook_SendEmbedRaw("Match Restarted", szDesc, COLOR_RESTART, false);
             }
-            return PLUGIN_CONTINUE;
+
+            Pug_ResetMatchScore();
+            g_bPugEnded = false;
         }
 
-        // Knife round / captain picks also print "started: Get ready" — only
-        // scoring halves count as live.
-        if (containi(szText, "First Half") != -1)
+        case PUG_STATE_HALFTIME:
         {
-            // First Half always marks a fresh match start: authoritative reset
-            // of cumulative totals (covers restart/cancel) and releases the
-            // restart/cancel embed guard for the new match.
-            g_bPugLive = true;
-            Pug_ResetMatchScore();
-            g_bMatchEventGuard = false;
+            Pug_HandleHalftime();
         }
-        else if (containi(szText, "Second Half") != -1 || containi(szText, "Overtime") != -1)
+
+        case PUG_STATE_SECOND_HALF, PUG_STATE_OVERTIME:
         {
-            g_bPugLive = true;
+            // If the 3s Halftime window was missed, apply it now so totals
+            // follow the player group into the new half.
+            if (iOldState == PUG_STATE_FIRST_HALF)
+            {
+                Pug_HandleHalftime();
+            }
+
             g_iPugHalfRounds = 0;
         }
 
-        return PLUGIN_CONTINUE;
-    }
-
-    if (containi(szText, "End of game") != -1 || containi(szText, "Game Over") != -1)
-    {
-        g_bPugMode = true;
-        g_bPugLive = false;
-        // A halftime announced right before the match ended should not fire
-        // (e.g. tie votes ending the game during the halftime pause).
-        if (g_bHalftimePending)
+        case PUG_STATE_END:
         {
+            // Match finished normally. Keep totals until the next match so the
+            // final Round Finished embed still has its score.
+            g_bPugEnded = true;
             g_bHalftimePending = false;
             g_bHalftimeSwap = false;
             remove_task(TASK_HALFTIME);
         }
-    }
 
-    return PLUGIN_CONTINUE;
+        case PUG_STATE_DEATHMATCH, PUG_STATE_DEAD:
+        {
+            if (g_bPugEnded || !Pug_MatchInProgress()) return;
+
+            new szDesc[192];
+            formatex(szDesc, charsmax(szDesc), "The match was cancelled. Final score (A/D): %d/%d", g_iTotalT, g_iTotalCT);
+            Webhook_SendEmbedRaw("Match Cancelled", szDesc, COLOR_CANCEL, false);
+
+            Pug_ResetMatchScore();
+            g_bPugEnded = false;
+        }
+    }
+}
+
+stock Pug_HandleHalftime()
+{
+    new iT = g_iTotalT;
+    new iD = g_iTotalCT;
+
+    // Mirror CPugMod::SwapTeams: at the end of regulation a tied score keeps
+    // the sides (overtime) and PugMod skips SwapAllPlayers.
+    new bool:bNoSwap = ((iT + iD) >= g_iPugRounds) && (iT == iD);
+    Pug_ScheduleHalftime(!bNoSwap, 0.5);
 }
 
 public Task_Halftime(iTaskId)
@@ -718,10 +753,6 @@ public Task_Halftime(iTaskId)
     new bool:bSwap = g_bHalftimeSwap;
     g_bHalftimeSwap = false;
 
-    g_bPugLive = false;
-    g_iPugHalfRounds = 0;
-    g_iPugHalfTimes++;
-
     new szDesc[192];
 
     if (bSwap)
@@ -729,23 +760,16 @@ public Task_Halftime(iTaskId)
         formatex(
             szDesc, charsmax(szDesc),
             "Teams are switching sides. %s (A/D): %d/%d",
-            (g_iPugHalfTimes == 1) ? "First half score" : "Score so far", g_iTotalT, g_iTotalCT
+            (g_iPugHalfTimes == 1) ? "First half score" : "Score so far",
+            g_iHalftimeScoreT, g_iHalftimeScoreD
         );
-
-        // Follow the sides across the swap: totals belong to the player group,
-        // so exchanging them keeps them aligned with the current T/CT slots
-        // (same semantics as PugMod's SWAP(m_Score[TERRORIST], m_Score[CT]) and
-        // ReGameDLL's SwapAllPlayers).
-        new iTemp = g_iTotalT;
-        g_iTotalT = g_iTotalCT;
-        g_iTotalCT = iTemp;
     }
     else
     {
         formatex(
             szDesc, charsmax(szDesc),
             "Halftime — teams keep their sides. Overtime begins. Score (A/D): %d/%d",
-            g_iTotalT, g_iTotalCT
+            g_iHalftimeScoreT, g_iHalftimeScoreD
         );
     }
 
